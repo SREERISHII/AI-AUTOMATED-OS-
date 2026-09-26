@@ -58,6 +58,7 @@ The planner only produces proposed actions. It never gets direct filesystem or e
 | **`package-lock.json`** | Lockfile defining precise dependency tree versions for reproducible installs. |
 | **`README.md`** | Comprehensive project overview, installation guide, architecture diagram, security boundaries, and file reference notes. |
 | **`UPGRADES.md`** | Complete specification and roadmap for future upgrades (chatbot UI, LLM email generation, revision workflow, file search, error handling). |
+| **`UI_UPGRADES.md`** | Detailed specifications for converting the popup interface into a continuous chatbot conversation view with cards, bubbles, and interactive controls. |
 | **`src/main.js`** | Electron main process entry point. Creates window, registers global hotkey (`Alt+Space`), records audit logs (`audit.jsonl`), and handles IPC channels (`agent:plan`, `agent:execute`). |
 | **`src/planner.js`** | Planning module. Sends prompt requests to local Ollama (`http://127.0.0.1:11434`) to build JSON action plans, with fallback regex parser for offline/quick execution. |
 | **`src/permission-manager.js`** | Security gatekeeper. Restricts path operations strictly to the user's `Documents` folder, blocks forbidden paths (`C:\Windows`, `.env`, SSH keys), and checks email address formats. |
