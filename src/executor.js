@@ -95,9 +95,57 @@ async function sendEmail(action, root) {
   });
 }
 
+async function recursiveSearch(dir, root, query, results = []) {
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    const relPath = path.relative(root, fullPath);
+    if (query && !entry.name.toLowerCase().includes(query.toLowerCase())) {
+      if (entry.isDirectory()) {
+        await recursiveSearch(fullPath, root, query, results).catch(() => {});
+      }
+      continue;
+    }
+    try {
+      const stats = await fs.stat(fullPath);
+      results.push({
+        name: entry.name,
+        relPath: relPath || '.',
+        isDir: entry.isDirectory(),
+        size: stats.size,
+        mtime: stats.mtime
+      });
+    } catch (_) {}
+    if (entry.isDirectory()) {
+      await recursiveSearch(fullPath, root, query, results).catch(() => {});
+    }
+  }
+  return results;
+}
+
 async function executeAction(action, context) {
   const root = context.documentsRoot;
   switch (action.type) {
+    case 'list_directory': {
+      const target = resolveSafe(root, action.path || '.');
+      const prefix = String(action.startsWith || '').toLocaleLowerCase();
+      const entries = await fs.readdir(target, { withFileTypes: true });
+      const matches = entries
+        .filter((entry) => entry.name.toLocaleLowerCase().startsWith(prefix))
+        .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
+      if (matches.length === 0) return [`No files or folders in ${action.path === '.' ? 'Documents' : action.path} match “${action.startsWith || ''}”.`];
+      return [`Found ${matches.length} item${matches.length === 1 ? '' : 's'}:`, ...matches.map((entry) => `${entry.isDirectory() ? 'Folder' : 'File'}: ${entry.name}`)];
+    }
+    case 'search_files': {
+      const target = resolveSafe(root, action.path || '.');
+      const query = action.query || '';
+      const matches = await recursiveSearch(target, root, query);
+      if (matches.length === 0) return [`No matching files or folders found for “${query}”.`];
+      return [
+        `Found ${matches.length} match${matches.length === 1 ? '' : 'es'} for “${query}”:`,
+        ...matches.map((item) => `${item.isDir ? 'Folder' : 'File'}: ${item.relPath} (${item.isDir ? 'directory' : `${Math.round(item.size / 1024)} KB`})`)
+      ];
+    }
     case 'create_folder': { const target = resolveSafe(root, action.path); await fs.mkdir(target, { recursive: false }); return `Created folder: ${action.path}`; }
     case 'create_file': { const target = resolveSafe(root, action.path); await fs.mkdir(path.dirname(target), { recursive: true }); await assertDoesNotExist(target); await fs.writeFile(target, String(action.content || ''), { flag: 'wx' }); return `Created file: ${action.path}`; }
     case 'rename':
@@ -111,7 +159,10 @@ async function executeAction(action, context) {
 
 async function executePlan(plan, context) {
   const results = [];
-  for (const action of plan.actions) results.push(await executeAction(action, context));
+  for (const action of plan.actions) {
+    const actionResults = await executeAction(action, context);
+    results.push(...(Array.isArray(actionResults) ? actionResults : [actionResults]));
+  }
   return results;
 }
 

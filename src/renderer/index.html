@@ -3,23 +3,72 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Private OS Agent</title>
+    <title>Private OS Agent — Chatbot</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <main>
-      <header><span class="dot"></span><div><h1>Private OS Agent</h1><p>Local planning • protected execution</p></div></header>
-      <section class="request"><label for="prompt">What would you like to do?</label><textarea id="prompt" autofocus placeholder="Example: Email acb@gmail.com the invoiceaug.pdf in Documents and say the August invoice is attached."></textarea><button id="planButton">Create safe plan</button></section>
-      <p id="status" aria-live="polite">Press Alt+Space any time to show or hide this window.</p>
-      <section id="review" hidden>
-        <div class="review-heading"><h2>Review before execution</h2><span id="plannerBadge"></span></div>
-        <p id="summary"></p><div id="permission"></div><ol id="actions"></ol>
-        <div class="warning">Nothing runs until you choose “Confirm & execute”. Emails will leave this computer only after confirmation.</div>
-        <div class="buttons"><button class="secondary" id="cancelButton">Cancel</button><button class="danger" id="executeButton" disabled>Confirm & execute</button></div>
-      </section>
-      <section id="result" hidden><h2>Completed</h2><ul id="results"></ul></section>
-      <footer>Safe file area: <code id="safeRoot"></code></footer>
-    </main>
+    <div class="chat-app">
+      <!-- App Header -->
+      <header class="app-header">
+        <div class="header-brand">
+          <span class="status-dot"></span>
+          <div>
+            <h1>Private OS Agent</h1>
+            <p class="subtitle">Local Ollama Planning • Sandboxed Execution</p>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button id="newChatBtn" class="btn btn-small btn-outline" title="Start a fresh conversation">
+            ➕ New Conversation
+          </button>
+        </div>
+      </header>
+
+      <!-- Scrollable Chat History -->
+      <main id="chatContainer" class="chat-container">
+        <div id="chatMessages" class="chat-messages">
+          <!-- Initial welcome agent bubble -->
+          <div class="message-group agent-group">
+            <div class="avatar">🤖</div>
+            <div class="message-bubble agent-bubble">
+              <p>Hello! I am your <strong>Private OS Agent</strong>.</p>
+              <p>I can help you create, search, move, and organize files in your <code>Documents</code> folder, or draft and send emails with Ollama.</p>
+              <div class="tips-box">
+                <p><strong>Try asking:</strong></p>
+                <ul>
+                  <li><code>Display files and folders in Documents</code></li>
+                  <li><code>Find all PDFs containing invoice</code></li>
+                  <li><code>Email alex@example.com about my leave today</code></li>
+                  <li><code>Create a folder called Project Notes in Documents</code></li>
+                </ul>
+              </div>
+              <span class="hint-text">Press <code>Alt + Space</code> anywhere to show or hide this window.</span>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <!-- Chat Footer Input Area -->
+      <footer class="app-footer">
+        <div class="input-container">
+          <textarea
+            id="promptInput"
+            rows="1"
+            placeholder="Type a request or email instruction... (Press Enter to send, Shift+Enter for newline)"
+            autofocus
+          ></textarea>
+          <button id="sendBtn" class="btn btn-primary btn-icon" title="Send request">
+            <span>Send</span> ➔
+          </button>
+        </div>
+        <div class="footer-info">
+          <span>Safe folder: <code id="safeRoot">Documents</code></span>
+          <span class="shortcut-badge">Alt + Space to toggle</span>
+        </div>
+      </footer>
+    </div>
+
     <script src="renderer.js"></script>
   </body>
 </html>
+

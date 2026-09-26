@@ -2,7 +2,7 @@ const { app, BrowserWindow, globalShortcut, ipcMain, shell } = require('electron
 const path = require('path');
 const fs = require('fs/promises');
 const os = require('os');
-const { buildPlan } = require('./planner');
+const { buildPlan, buildEmailRevision } = require('./planner');
 const { checkPlan } = require('./permission-manager');
 const { executePlan } = require('./executor');
 
@@ -22,8 +22,8 @@ function writeAudit(event, detail) {
 
 async function createWindow() {
   window = new BrowserWindow({
-    width: 720,
-    height: 680,
+    width: 760,
+    height: 720,
     show: false,
     resizable: true,
     autoHideMenuBar: true,
@@ -51,6 +51,14 @@ ipcMain.handle('agent:plan', async (_event, request) => {
   return { plan, permission, documentsRoot };
 });
 
+ipcMain.handle('agent:revise-email', async (_event, { draft, instruction }) => {
+  const revisedAction = await buildEmailRevision(draft, instruction);
+  const plan = { summary: 'Revised email draft', actions: [revisedAction], planner: 'ollama:email-revision' };
+  const permission = checkPlan(plan, documentsRoot);
+  await writeAudit('email-revised', { instruction, draft: revisedAction, allowed: permission.allowed, reasons: permission.reasons });
+  return { plan, permission, documentsRoot };
+});
+
 ipcMain.handle('agent:execute', async (_event, plan) => {
   const permission = checkPlan(plan, documentsRoot);
   if (!permission.allowed) throw new Error(`Blocked by permission manager: ${permission.reasons.join('; ')}`);
@@ -58,3 +66,4 @@ ipcMain.handle('agent:execute', async (_event, plan) => {
   await writeAudit('plan-executed', { actions: plan.actions, results });
   return results;
 });
+
