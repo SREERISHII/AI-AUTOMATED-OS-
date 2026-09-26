@@ -58,14 +58,18 @@ async function sendEmail(action, root) {
   if (!config.host || !config.auth.user || !config.auth.pass) throw new Error('Email is not configured. Add SMTP values to .env first.');
 
   const rawAttachments = Array.isArray(action.attachments) ? action.attachments : [];
-  const invalidPlaceholders = new Set(['none', 'attachments', 'relative documents path', 'null', 'undefined', '']);
-  const cleanAttachments = rawAttachments.filter((att) => typeof att === 'string' && att.trim() !== '' && !invalidPlaceholders.has(att.toLowerCase()));
+  const invalidPlaceholders = new Set(['none', 'attachments', 'relative documents path', 'null', 'undefined', '.', 'documents', '']);
+  const cleanAttachments = rawAttachments
+    .filter((att) => typeof att === 'string' && att.trim() !== '' && att.trim() !== '.' && !invalidPlaceholders.has(att.trim().toLowerCase()));
 
   const attachments = [];
   for (const attachment of cleanAttachments) {
     const target = resolveSafe(root, attachment);
     try {
-      await assertFile(target);
+      const stat = await fs.stat(target);
+      if (stat.isDirectory()) {
+        throw new Error(`Attachment "${attachment}" is a folder, not a file.`);
+      }
     } catch (error) {
       if (error.code === 'ENOENT') throw new Error(`Attachment not found in Documents: ${attachment}. Create the file first, then try again.`);
       throw error;

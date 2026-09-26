@@ -38,10 +38,10 @@ function normalizeDocumentsPath(value) {
 function filterValidAttachments(attachments) {
   if (!attachments) return [];
   const list = Array.isArray(attachments) ? attachments : [attachments];
-  const invalidPlaceholders = new Set(['none', 'attachments', 'relative documents path', 'null', 'undefined', '']);
+  const invalidPlaceholders = new Set(['none', 'attachments', 'relative documents path', 'null', 'undefined', '.', 'documents', '']);
   return list
     .map(normalizeDocumentsPath)
-    .filter(item => typeof item === 'string' && item.trim() !== '' && !invalidPlaceholders.has(item.toLowerCase()));
+    .filter(item => typeof item === 'string' && item.trim() !== '' && item.trim() !== '.' && !invalidPlaceholders.has(item.toLowerCase()));
 }
 
 function normalizePlanPaths(plan) {
