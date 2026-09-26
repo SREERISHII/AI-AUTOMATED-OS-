@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Private OS Agent</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <header><span class="dot"></span><div><h1>Private OS Agent</h1><p>Local planning • protected execution</p></div></header>
+      <section class="request"><label for="prompt">What would you like to do?</label><textarea id="prompt" autofocus placeholder="Example: Email acb@gmail.com the invoiceaug.pdf in Documents and say the August invoice is attached."></textarea><button id="planButton">Create safe plan</button></section>
+      <p id="status" aria-live="polite">Press Alt+Space any time to show or hide this window.</p>
+      <section id="review" hidden>
+        <div class="review-heading"><h2>Review before execution</h2><span id="plannerBadge"></span></div>
+        <p id="summary"></p><div id="permission"></div><ol id="actions"></ol>
+        <div class="warning">Nothing runs until you choose “Confirm & execute”. Emails will leave this computer only after confirmation.</div>
+        <div class="buttons"><button class="secondary" id="cancelButton">Cancel</button><button class="danger" id="executeButton" disabled>Confirm & execute</button></div>
+      </section>
+      <section id="result" hidden><h2>Completed</h2><ul id="results"></ul></section>
+      <footer>Safe file area: <code id="safeRoot"></code></footer>
+    </main>
+    <script src="renderer.js"></script>
+  </body>
+</html>

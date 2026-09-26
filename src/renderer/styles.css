@@ -1,0 +1,19 @@
+:root { color-scheme: dark; font-family: Inter, Segoe UI, sans-serif; background: #0c1019; color: #edf1fb; }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 100% 0%, #192848, transparent 42%), #0c1019; }
+main { max-width: 760px; margin: auto; padding: 30px; }
+header { display: flex; gap: 12px; align-items: center; margin-bottom: 28px; }
+h1 { font-size: 22px; margin: 0; } h2 { font-size: 17px; } p { color: #acb8ce; } header p { margin: 3px 0 0; font-size: 13px; }
+.dot { width: 13px; height: 13px; border-radius: 50%; background: #6de3a8; box-shadow: 0 0 15px #6de3a8; }
+label { display: block; font-size: 14px; font-weight: 650; margin-bottom: 9px; }
+textarea { width: 100%; min-height: 120px; border: 1px solid #33415b; background: #141b29; color: inherit; border-radius: 10px; padding: 13px; font: inherit; resize: vertical; }
+textarea:focus { outline: 2px solid #6d9cff; border-color: transparent; }
+button { margin-top: 12px; border: 0; border-radius: 8px; padding: 10px 15px; font: inherit; font-weight: 650; color: #07111d; background: #79a5ff; cursor: pointer; } button:disabled { opacity: .45; cursor: not-allowed; }
+#status { min-height: 21px; font-size: 13px; }
+#review, #result { border: 1px solid #2e3a52; background: #111927; border-radius: 12px; padding: 18px; margin-top: 18px; }
+.review-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }.review-heading h2, #result h2 { margin: 0; }
+#plannerBadge { font-size: 11px; border-radius: 99px; padding: 4px 8px; color: #b9cdfd; background: #1b315c; }
+ol { padding-left: 23px; } li { margin: 9px 0; color: #dce5f8; }
+.allowed, .blocked, .warning { border-radius: 7px; padding: 10px; font-size: 13px; }.allowed { background: #123424; color: #9bf1bf; }.blocked { background: #481d2a; color: #ffb9c3; }.warning { background: #392e14; color: #ffe59a; margin-top: 16px; }
+.buttons { display: flex; justify-content: flex-end; gap: 10px; }.secondary { background: #29364d; color: #e6edfb; }.danger { background: #ff917d; }
+footer { margin-top: 24px; font-size: 12px; color: #8290a7; } code { color: #b9cdfd; overflow-wrap: anywhere; }

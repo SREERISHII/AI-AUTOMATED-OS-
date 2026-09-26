@@ -1,0 +1,18 @@
+{
+  "name": "private-os-agent",
+  "version": "0.1.0",
+  "description": "Local-first file and email automation with approval gates",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "test": "node test/permission-manager.test.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "nodemailer": "^6.10.0"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0"
+  }
+}
