@@ -202,10 +202,13 @@ body {
   width: 100%;
 }
 
-.agent-bubble p {
+.agent-bubble p,
+.user-bubble p {
   margin: 0 0 8px 0;
+  white-space: pre-wrap;
 }
-.agent-bubble p:last-child {
+.agent-bubble p:last-child,
+.user-bubble p:last-child {
   margin-bottom: 0;
 }
 

@@ -37,16 +37,43 @@ function cleanJson(text) {
   return JSON.parse(text.slice(first, last + 1));
 }
 
+const CAPABILITY_GUIDE = `Here is what I can do for you:
+
+📁 File Operations (Inside Documents)
+• List files & folders: "list folders" or "show items in Documents"
+• Search files: "find my resume" or "search for pdf files"
+• Create items: "create folder Work" or "create file notes.txt"
+• Organize: "move notes.txt to Work", "rename old.txt to new.txt", or "delete temp.txt"
+
+✉️ Email Assistant
+• Draft & send emails: "send email to friend@gmail.com with subject Project Update"
+• Attach files: "email bob@gmail.com and attach SREERISHI_RESUME.pdf"
+• Interactive revisions: "make it more formal", "shorten it", or "add a polite closing"
+
+🧾 Task History
+• View recent actions: "show task history" or "view audit logs"
+
+🛡️ Safety First
+• All actions are restricted to your Documents folder.
+• Important file changes and emails always ask for your review and confirmation before running.`;
+
+function isCapabilityRequest(request) {
+  const norm = String(request || '').trim().toLowerCase().replace(/\s+/g, ' ');
+  if (/\b(delete|remove|create|make|rename|move|attach)\b/i.test(norm)) return false;
+  return /\b(what\s+(?:can|could)\s+(?:you|yu|u)\s+do|what\s+(?:do|can)\s+(?:you|yu|u)\s+(?:actually\s+)?do|what\s+(?:you|yu|u)\s+can\s+do|what\s+are\s+(?:you|yu|u)\s+able\s+to\s+do|what\s+are\s+(?:your|ur)\s+(?:capabilities|features|functions|commands)|what\s+are\s+(?:the\s+)?(?:capabilities|features|commands)|tell\s+me\s+what\s+(?:you|yu|u)\s+can\s+do|tell\s+me\s+(?:your|ur)\s+(?:features|capabilities)|show\s+(?:me\s+)?(?:your|ur\s+)?(?:features|capabilities|commands)|help|how\s+does\s+this\s+work|how\s+do\s+i\s+use\s+(?:this|you)|who\s+are\s+you|what\s+is\s+this)\b/i.test(norm)
+    || /^(features|capabilities|help|commands|\?)$/i.test(norm);
+}
+
 function localConversationReply(request) {
-  const text = String(request || '').trim();
+  const text = String(request || '').trim().replace(/\s+/g, ' ');
   const lower = text.toLowerCase();
+  if (isCapabilityRequest(text)) {
+    return CAPABILITY_GUIDE;
+  }
   if (/^(hi+|hello+|hey+|he+y+|hel+|hai+|hola|yo|sup|greetings)(?:\s+there)?[.!' ]*$/i.test(text) || /^(good\s+(morning|afternoon|evening|day))[.!' ]*$/i.test(text)) {
     return 'Hello! I am Private OS Agent. I can safely manage files in your Documents folder, search and organize them, show task history, and draft or send emails after you review and confirm. What would you like me to do?';
   }
   if (/^(thanks|thank you|thx)\b/i.test(text)) return 'You’re welcome. I’m ready to help with your Documents folder or an email task.';
-  if (/\b(what can you do|what do you do|what (?:can|could) y(?:ou|u) do|what y(?:ou|u) can do|what are you able to do|your capabilities|who are you)\b/i.test(lower)) {
-    return 'I am Private OS Agent. I plan file and email tasks locally with Ollama, check permissions, show you the plan, and execute only after approval.';
-  }
   if (/\b(weather|joke|recipe|movie|song|politics|stock price|medical advice|write code|browse the internet)\b/i.test(lower)) {
     return 'I can’t help with that here. I’m focused on protected file operations in Documents and reviewed email tasks. You can ask me to list, search, create, rename, move, open, or delete a Documents item, or draft/send an email.';
   }
@@ -652,6 +679,9 @@ async function buildPlan(request, documentsRoot) {
   if (isTaskHistoryRequest(request)) {
     return { summary: 'Recent task history', actions: [{ type: 'show_task_history' }], planner: 'deterministic:task_history' };
   }
+  if (isCapabilityRequest(request)) {
+    return { summary: 'Capabilities & Help', reply: CAPABILITY_GUIDE, actions: [], planner: 'deterministic:capabilities' };
+  }
   const localReply = localConversationReply(request);
   if (localReply) return { summary: 'Conversation', reply: await buildConversationReply(request), actions: [], planner: `ollama:${model}:conversation` };
   let lastError;
@@ -770,6 +800,6 @@ Return ONLY valid JSON:
   throw new Error('Email revision failed');
 }
 
-module.exports = { buildPlan, buildEmailRevision, normalizeDocumentsPath, normalizeEmailText, isTaskHistoryRequest };
+module.exports = { buildPlan, buildEmailRevision, normalizeDocumentsPath, normalizeEmailText, isTaskHistoryRequest, isCapabilityRequest, CAPABILITY_GUIDE };
 
 
