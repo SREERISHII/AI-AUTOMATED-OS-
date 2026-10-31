@@ -40,6 +40,8 @@ sendBtn.addEventListener('click', handleSend);
 newChatBtn.addEventListener('click', () => {
   latestEmailDraft = null;
   pendingApproval = null;
+  // Clear backend conversation history
+  if (window.agent?.clearHistory) window.agent.clearHistory().catch(() => {});
   chatMessages.innerHTML = `
     <div class="message-group agent-group">
       <div class="avatar">🤖</div>
@@ -99,27 +101,27 @@ function emailActionsEqual(left, right) {
 function describeAction(action) {
   const label = (val) => val === '.' ? 'Documents' : val;
   switch (action.type) {
-    case 'create_folder': return `📁 Create folder: “${label(action.path)}”`;
-    case 'create_file': return `📄 Create file: “${label(action.path)}”`;
-    case 'rename': return `✏️ Rename: “${label(action.path)}” ➔ “${label(action.destination)}”`;
-    case 'move': return `📦 Move: “${label(action.path)}” ➔ “${label(action.destination)}”`;
-    case 'delete': return `🗑️ Move to Recycle Bin: “${label(action.path)}”`;
-    case 'open': return `📂 Open: “${label(action.path)}”`;
+    case 'create_folder': return `Create folder "${label(action.path)}"`;
+    case 'create_file': return `Create file "${label(action.path)}"`;
+    case 'rename': return `Rename "${label(action.path)}" to "${label(action.destination)}"`;
+    case 'move': return `Move "${label(action.path)}" to "${label(action.destination)}"`;
+    case 'delete': return `Move "${label(action.path)}" to Recycle Bin`;
+    case 'open': return `Open "${label(action.path)}"`;
     case 'list_directory': {
       const dirName = label(action.path || '.');
       const typeInfo = action.entryType === 'folder' ? ' (folders only)' : action.entryType === 'file' ? ' (files only)' : '';
-      const prefixInfo = action.startsWith ? ` (starting with '${action.startsWith}')` : '';
-      return `📋 List directory: “${dirName}${typeInfo}${prefixInfo}”`;
+      const prefixInfo = action.startsWith ? ` starting with "${action.startsWith}"` : '';
+      return `List contents of ${dirName}${typeInfo}${prefixInfo}`;
     }
     case 'search_files': {
       const parts = [];
-      if (action.query) parts.push(`“${action.query}”`);
-      if (action.ext) parts.push(`type: .${action.ext}`);
-      const details = parts.length > 0 ? parts.join(' ') : 'all';
-      return `🔍 Search files: ${details} in Documents`;
+      if (action.query) parts.push(`"${action.query}"`);
+      if (action.ext) parts.push(`.${action.ext} files`);
+      const details = parts.length > 0 ? parts.join(' ') : 'all files';
+      return `Search for ${details} in Documents`;
     }
-    case 'show_task_history': return '🧾 Show recent task history';
-    case 'send_email': return `✉️ Send email to ${action.to?.join(', ') || 'recipient'} — ${action.subject || 'No Subject'}`;
+    case 'show_task_history': return 'Show recent task history';
+    case 'send_email': return `Send email to ${action.to?.join(', ') || 'recipient'} — ${action.subject || 'No Subject'}`;
     default: return action.type;
   }
 }
@@ -133,7 +135,7 @@ async function handleSend() {
   promptInput.style.height = 'auto';
   sendBtn.disabled = true;
 
-  if (pendingApproval && /^(yes|yeah|yep|confirm|confirmed|do it|send|proceed)$/i.test(text)) {
+  if (pendingApproval && /^(yes|yeah|yep|yup|sure|ok|okay|confirm|confirmed|do it|send|send it|proceed|go ahead|approve|execute)$/i.test(text)) {
     const pending = pendingApproval;
     pendingApproval = null;
     appendUserMessage(text);
@@ -141,10 +143,10 @@ async function handleSend() {
     try {
       const results = await window.agent.execute(pending.plan, pending.capability);
       typingGroup.remove();
-      renderExecutionResults(results);
+      renderExecutionResults(results, pending.plan);
     } catch (err) {
       typingGroup.remove();
-      renderAgentTextResponse(`❌ Execution failed: ${err.message}`);
+      renderAgentTextResponse(`I couldn't complete that action: ${err.message}`);
     } finally {
       isProcessing = false;
       sendBtn.disabled = false;
@@ -152,10 +154,10 @@ async function handleSend() {
     return;
   }
 
-  if (pendingApproval && /^(no|nope|cancel|stop|not now)$/i.test(text)) {
+  if (pendingApproval && /^(no|nope|cancel|stop|not now|never mind|forget it|don'?t|dont|nah|skip)$/i.test(text)) {
     pendingApproval = null;
     appendUserMessage(text);
-    renderAgentTextResponse('Okay. Nothing was executed. You can ask me to prepare a new task whenever you are ready.');
+    renderAgentTextResponse('Understood. I cancelled that action. What would you like to do instead?');
     isProcessing = false;
     sendBtn.disabled = false;
     return;
@@ -171,7 +173,7 @@ async function handleSend() {
       renderAgentPlanResponse(revisedData, text);
     } catch (err) {
       typingGroup.remove();
-      renderAgentTextResponse(`⚠️ Could not revise draft: ${err.message}`);
+      renderAgentTextResponse(`I couldn't revise the draft: ${err.message}`);
     } finally {
       isProcessing = false;
       sendBtn.disabled = false;
@@ -193,7 +195,7 @@ async function handleSend() {
     renderAgentPlanResponse(data, text);
   } catch (err) {
     typingGroup.remove();
-    renderAgentTextResponse(`⚠️ Could not create a plan: ${err.message}`);
+    renderAgentTextResponse(`Something went wrong: ${err.message}. Please try again.`);
   } finally {
     isProcessing = false;
     sendBtn.disabled = false;
@@ -219,7 +221,7 @@ function renderAgentPlanResponse(data, originalRequest) {
   group.className = 'message-group agent-group';
 
   if (!plan.actions?.length) {
-    const replyText = plan.reply || plan.summary || 'Hello! How can I assist you?';
+    const replyText = plan.reply || plan.summary || "I'm here to help. What would you like to do?";
     group.innerHTML = `
       <div class="avatar">🤖</div>
       <div class="message-bubble agent-bubble">
@@ -243,11 +245,13 @@ function renderAgentPlanResponse(data, originalRequest) {
     cardHtml = renderActionPlanCard(plan, permission, isReadOnly);
   }
 
+  // Natural language summary instead of raw task metadata
+  const summaryText = plan.summary || 'Proposed Actions';
+
   group.innerHTML = `
     <div class="avatar">🤖</div>
     <div class="message-bubble agent-bubble">
-      <p><strong>${escapeHtml(plan.summary || 'Proposed Actions')}</strong></p>
-      ${capability ? `<p class="task-meta">Task: ${escapeHtml(capability.taskId)} · expires ${escapeHtml(new Date(capability.expiresAt).toLocaleTimeString())}</p>` : ''}
+      <p>${escapeHtml(summaryText)}</p>
       ${cardHtml}
     </div>
   `;
@@ -274,7 +278,7 @@ function renderEmailDraftCard(emailAction, permission, plan) {
     : 'None';
 
   const badgeClass = permission.allowed ? 'badge-allowed' : 'badge-blocked';
-  const badgeText = permission.allowed ? 'Permission Approved' : `Blocked: ${permission.reasons.join('; ')}`;
+  const badgeText = permission.allowed ? 'Ready to send' : `Blocked: ${permission.reasons.join('; ')}`;
   const cleanBody = String(emailAction.body || '').replace(/\\+r\\+n/g, '\n').replace(/\\+n/g, '\n');
 
   return `
@@ -303,7 +307,7 @@ function renderEmailDraftCard(emailAction, permission, plan) {
       ${permission.allowed ? `
         <div class="composer-prompt">
           <span class="composer-prompt-icon">🤖</span>
-          <span>Looks good? You can <strong>edit fields above directly</strong>, type revision instructions below, or hit <strong>Send</strong>.</span>
+          <span>Review the draft above. You can <strong>edit fields directly</strong>, type revision instructions below, or hit <strong>Send</strong> when ready.</span>
         </div>
         <div class="revision-box">
           <input type="text" class="revision-input" placeholder="e.g. Make it more formal, add a greeting, mention deadline..." />
@@ -315,7 +319,7 @@ function renderEmailDraftCard(emailAction, permission, plan) {
         </div>
       ` : `
         <div class="card-actions">
-          <p style="color:var(--accent-red); font-size:12px; margin:4px 0 0 0;">Cannot execute: ${permission.reasons.map(escapeHtml).join(' ')}</p>
+          <p style="color:var(--accent-red); font-size:12px; margin:4px 0 0 0;">Cannot send: ${permission.reasons.map(escapeHtml).join(' ')}</p>
         </div>
       `}
     </div>
@@ -324,7 +328,7 @@ function renderEmailDraftCard(emailAction, permission, plan) {
 
 function renderActionPlanCard(plan, permission, isReadOnly) {
   const badgeClass = permission.allowed ? 'badge-allowed' : 'badge-blocked';
-  const badgeText = permission.allowed ? 'Permission Approved' : `Blocked: ${permission.reasons.join('; ')}`;
+  const badgeText = permission.allowed ? (isReadOnly ? 'Auto-executing' : 'Waiting for your confirmation') : `Blocked: ${permission.reasons.join('; ')}`;
 
   const actionsListHtml = plan.actions
     .map((action) => `<li>${escapeHtml(describeAction(action))}</li>`)
@@ -383,9 +387,7 @@ function attachCardEventListeners(group, plan, isEmail, capability) {
       readComposerState
     };
 
-    // Any manual edit invalidates the previously approved capability. The user
-    // must revise the draft (or create a new plan) before a natural-language
-    // "yes" can execute it.
+    // Any manual edit invalidates the previously approved capability
     group.querySelectorAll('.email-to-input, .email-subject-input, .email-body-input').forEach((input) => {
       input.addEventListener('input', () => {
         if (pendingApproval?.group === group) pendingApproval = null;
@@ -398,7 +400,6 @@ function attachCardEventListeners(group, plan, isEmail, capability) {
         if (!instruction) return;
         revisionInput.value = '';
 
-        // Read the current composer state so AI revises what the user sees (including manual edits)
         const currentDraft = readComposerState();
         appendUserMessage(instruction);
         const typing = showTypingIndicator();
@@ -409,7 +410,7 @@ function attachCardEventListeners(group, plan, isEmail, capability) {
           renderAgentPlanResponse(revisedData, instruction);
         } catch (err) {
           typing.remove();
-          renderAgentTextResponse(`⚠️ Could not revise draft: ${err.message}`);
+          renderAgentTextResponse(`I couldn't revise the draft: ${err.message}`);
         }
       };
 
@@ -423,14 +424,12 @@ function attachCardEventListeners(group, plan, isEmail, capability) {
       sendBtnEl.addEventListener('click', async () => {
         sendBtnEl.disabled = true;
 
-        // Build the plan from the current composer state (captures manual edits)
         const liveAction = readComposerState();
         let targetPlan = plan;
         let targetCapability = capability;
 
         const typing = showTypingIndicator();
         try {
-          // If user manually edited composer fields, get an approved capability for the edited draft
           if (!emailActionsEqual(liveAction, emailAction)) {
             const approved = await window.agent.approveDraft(liveAction);
             targetPlan = approved.plan;
@@ -441,10 +440,10 @@ function attachCardEventListeners(group, plan, isEmail, capability) {
           pendingApproval = null;
           const results = await window.agent.execute(targetPlan, targetCapability);
           typing.remove();
-          renderExecutionResults(results);
+          renderExecutionResults(results, targetPlan);
         } catch (err) {
           typing.remove();
-          renderAgentTextResponse(`❌ Email dispatch failed: ${err.message}`);
+          renderAgentTextResponse(`Email dispatch failed: ${err.message}`);
           sendBtnEl.disabled = false;
         }
       });
@@ -467,10 +466,10 @@ function attachCardEventListeners(group, plan, isEmail, capability) {
         try {
           const results = await window.agent.execute(plan, capability);
           typing.remove();
-          renderExecutionResults(results);
+          renderExecutionResults(results, plan);
         } catch (err) {
           typing.remove();
-          renderAgentTextResponse(`❌ Execution failed: ${err.message}`);
+          renderAgentTextResponse(`Action failed: ${err.message}`);
         }
       });
     }
@@ -480,13 +479,13 @@ function attachCardEventListeners(group, plan, isEmail, capability) {
 async function autoExecuteReadOnly(plan, group, capability) {
   try {
     const results = await window.agent.execute(plan, capability);
-    renderExecutionResults(results);
+    renderExecutionResults(results, plan);
   } catch (err) {
-    renderAgentTextResponse(`❌ Action failed: ${err.message}`);
+    renderAgentTextResponse(`I couldn't complete that: ${err.message}`);
   }
 }
 
-function renderExecutionResults(results) {
+function renderExecutionResults(results, plan) {
   const group = document.createElement('div');
   group.className = 'message-group agent-group';
 
@@ -494,10 +493,22 @@ function renderExecutionResults(results) {
     .map((res) => `<li>${escapeHtml(res)}</li>`)
     .join('');
 
+  // Natural language completion message based on action type
+  const actionType = plan?.actions?.[0]?.type || '';
+  let completionLabel = 'Done!';
+  if (actionType === 'list_directory' || actionType === 'search_files') completionLabel = 'Here\'s what I found:';
+  else if (actionType === 'show_task_history') completionLabel = 'Recent task history:';
+  else if (actionType === 'send_email') completionLabel = 'Email sent successfully!';
+  else if (actionType === 'create_folder' || actionType === 'create_file') completionLabel = 'Created successfully!';
+  else if (actionType === 'delete') completionLabel = 'Moved to Recycle Bin.';
+  else if (actionType === 'rename') completionLabel = 'Renamed successfully!';
+  else if (actionType === 'move') completionLabel = 'Moved successfully!';
+  else if (actionType === 'open') completionLabel = 'Opened!';
+
   group.innerHTML = `
     <div class="avatar">🤖</div>
     <div class="message-bubble agent-bubble">
-      <p style="color:var(--accent-green); font-weight:600;">✅ Execution Completed</p>
+      <p style="color:var(--accent-green); font-weight:600;">✅ ${escapeHtml(completionLabel)}</p>
       <ul class="action-list">${resultItems}</ul>
     </div>
   `;
@@ -505,4 +516,3 @@ function renderExecutionResults(results) {
   chatMessages.appendChild(group);
   scrollToBottom();
 }
-

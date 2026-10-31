@@ -7,8 +7,9 @@ const sensitiveAttachment = /(^|[\\/])(\.env|id_rsa|id_ed25519|credentials|passw
 
 function safeDocumentPath(value, root) {
   if (typeof value !== 'string' || !value.trim() || path.isAbsolute(value) || protectedNames.test(value)) return false;
-  const resolved = path.resolve(root, value);
-  return resolved === root || resolved.startsWith(root + path.sep);
+  const resolvedRoot = path.resolve(root);
+  const resolved = path.resolve(resolvedRoot, value);
+  return resolved === resolvedRoot || resolved.startsWith(resolvedRoot + path.sep);
 }
 
 function checkPlan(plan, root) {

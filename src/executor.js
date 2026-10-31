@@ -253,7 +253,27 @@ async function executeAction(action, context) {
     case 'create_folder': { const target = resolveSafe(root, action.path); await fs.mkdir(target, { recursive: true }); return `Created folder: ${action.path}`; }
     case 'create_file': { const target = resolveSafe(root, action.path); await fs.mkdir(path.dirname(target), { recursive: true }); await assertDoesNotExist(target); await fs.writeFile(target, String(action.content || ''), { flag: 'wx' }); return `Created file: ${action.path}`; }
     case 'rename':
-    case 'move': { const source = resolveSafe(root, action.path); const target = resolveSafe(root, action.destination); await fs.access(source); await fs.mkdir(path.dirname(target), { recursive: true }); await assertDoesNotExist(target); await fs.rename(source, target); return `${action.type === 'rename' ? 'Renamed' : 'Moved'}: ${action.path} → ${action.destination}`; }
+    case 'move': {
+      const source = resolveSafe(root, action.path);
+      let target = resolveSafe(root, action.destination);
+      await fs.access(source);
+
+      // If moving/renaming into an existing directory, place the item inside that directory
+      try {
+        const destStat = await fs.stat(target);
+        if (destStat.isDirectory()) {
+          target = path.join(target, path.basename(source));
+        }
+      } catch (err) {
+        if (err.code !== 'ENOENT') throw err;
+      }
+
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await assertDoesNotExist(target);
+      await fs.rename(source, target);
+      const displayDest = path.relative(root, target).replace(/\\/g, '/');
+      return `${action.type === 'rename' ? 'Renamed' : 'Moved'}: ${action.path} → ${displayDest}`;
+    }
     case 'delete': {
       const target = resolveSafe(root, action.path);
       await fs.access(target);

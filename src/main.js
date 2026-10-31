@@ -2,7 +2,7 @@ const { app, BrowserWindow, globalShortcut, ipcMain, shell } = require('electron
 const path = require('path');
 const fs = require('fs/promises');
 const os = require('os');
-const { buildPlan, buildEmailRevision } = require('./planner');
+const { buildPlan, buildEmailRevision, clearHistory, conversationContext, pushHistory } = require('./planner');
 const { checkPlan } = require('./permission-manager');
 const { executePlan } = require('./executor');
 const { CapabilityManager } = require('./capability-manager');
@@ -48,15 +48,31 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', (event) => event.preventDefault());
 app.on('will-quit', () => globalShortcut.unregisterAll());
 
+// Clear conversation history on new chat
+ipcMain.handle('agent:clear-history', async () => {
+  clearHistory();
+  return { ok: true };
+});
+
 ipcMain.handle('agent:plan', async (_event, request) => {
-  const task = await capabilityManager.startTask(String(request || ''));
   const plan = await buildPlan(String(request || ''), documentsRoot);
-  const permission = checkPlan(plan, documentsRoot);
+
+  // Pure conversation: no actions, no task needed
   if (!plan.actions?.length) {
-    const reply = plan.reply || plan.summary || 'Hello! How can I assist you?';
+    const reply = plan.reply || plan.summary || "I'm here to help. What would you like to do?";
     await writeAudit('conversation-replied', { request, planner: plan.planner, reply });
-    return { plan: { ...plan, reply }, permission: { ...permission, allowed: true, reasons: [], requiresConfirmation: false }, documentsRoot, capability: null };
+    return {
+      plan: { ...plan, reply },
+      permission: { allowed: true, reasons: [], requiresConfirmation: false },
+      documentsRoot,
+      capability: null,
+      intent: plan.intent || null
+    };
   }
+
+  // Task execution: create capability token
+  const task = await capabilityManager.startTask(String(request || ''));
+  const permission = checkPlan(plan, documentsRoot);
   if (!permission.allowed) {
     await capabilityManager.reject(task, permission.reasons.join('; '));
     await writeAudit('plan-created', { taskId: task.taskId, request, planner: plan.planner, allowed: false, reasons: permission.reasons });
@@ -108,10 +124,11 @@ ipcMain.handle('agent:execute', async (_event, { plan, capability }) => {
   try {
     const results = await executePlan(plan, { documentsRoot, shell, capabilityLogPath, auditPath });
     await writeAudit('plan-executed', { taskId: capability.taskId, actions: plan.actions, results });
+    // Store results in conversation context for follow-up questions
+    conversationContext.lastResults = results;
     return results;
   } catch (error) {
     await writeAudit('execution-failed', { taskId: capability.taskId, actions: plan.actions, error: error.message });
     throw error;
   }
 });
-
