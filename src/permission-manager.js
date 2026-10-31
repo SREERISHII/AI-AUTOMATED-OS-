@@ -1,6 +1,6 @@
 const path = require('path');
 
-const allowedTypes = new Set(['list_directory', 'search_files', 'create_folder', 'create_file', 'rename', 'move', 'delete', 'open', 'send_email']);
+const allowedTypes = new Set(['list_directory', 'search_files', 'show_task_history', 'create_folder', 'create_file', 'rename', 'move', 'delete', 'open', 'send_email']);
 const protectedNames = /(^|[\\/])(windows|program files|programdata|appdata|\.ssh|\.git|system volume information)([\\/]|$)/i;
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const sensitiveAttachment = /(^|[\\/])(\.env|id_rsa|id_ed25519|credentials|passwords?|secrets?|wallet|.*\.(pem|key|pfx|p12))$/i;
@@ -19,7 +19,7 @@ function checkPlan(plan, root) {
     const label = `Action ${index + 1}`;
     if (!allowedTypes.has(action.type)) reasons.push(`${label}: action type is not allowed.`);
     const targetPath = action.path || '.';
-    if (action.type !== 'send_email' && !safeDocumentPath(targetPath, root)) reasons.push(`${label}: path is outside the Documents safe area.`);
+    if (!['send_email', 'show_task_history'].includes(action.type) && !safeDocumentPath(targetPath, root)) reasons.push(`${label}: path is outside the Documents safe area.`);
     if (['rename', 'move'].includes(action.type) && !safeDocumentPath(action.destination, root)) reasons.push(`${label}: destination is outside the Documents safe area.`);
     if (action.type === 'send_email') {
       if (!Array.isArray(action.to) || action.to.length === 0 || action.to.some((address) => !emailPattern.test(address))) reasons.push(`${label}: recipient email is invalid.`);
@@ -30,7 +30,7 @@ function checkPlan(plan, root) {
       }
     }
   }
-  const requiresConfirmation = (plan?.actions || []).some((action) => !['list_directory', 'search_files'].includes(action.type));
+  const requiresConfirmation = (plan?.actions || []).some((action) => !['list_directory', 'search_files', 'show_task_history'].includes(action.type));
   return { allowed: reasons.length === 0, reasons, requiresConfirmation };
 }
 

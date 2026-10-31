@@ -182,6 +182,12 @@ body {
   position: relative;
 }
 
+.task-meta {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin: 4px 0 10px;
+}
+
 .user-bubble {
   background: var(--bg-bubble-user);
   color: #ffffff;
@@ -252,25 +258,104 @@ body {
   color: #93c5fd;
 }
 
-/* Email Draft Styling */
-.email-field {
-  margin-bottom: 6px;
-  font-size: 13px;
-}
-.email-field strong {
-  color: var(--text-muted);
+/* Email Composer (Editable Draft) */
+.email-composer {
+  margin: 8px 0;
 }
 
-.email-body-box {
+.composer-field {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.composer-body-field {
+  flex-direction: column;
+  align-items: stretch;
+  border-bottom: none;
+}
+
+.composer-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  min-width: 62px;
+  padding: 9px 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+.composer-body-field .composer-label {
+  padding: 9px 10px 4px;
+}
+
+.composer-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-main);
+  font: inherit;
+  font-size: 13px;
+  padding: 9px 10px;
+  outline: none;
+}
+
+.composer-input:focus {
+  background: rgba(59, 130, 246, 0.06);
+}
+
+.composer-textarea {
+  width: 100%;
   background: #0d131f;
   border: 1px solid var(--border-color);
   border-radius: 6px;
-  padding: 10px 12px;
-  font-family: inherit;
-  font-size: 13px;
-  white-space: pre-wrap;
-  margin: 10px 0;
   color: #e2e8f0;
+  font: inherit;
+  font-size: 13px;
+  padding: 10px 12px;
+  margin: 4px 10px 10px;
+  resize: vertical;
+  min-height: 100px;
+  max-height: 300px;
+  line-height: 1.5;
+  outline: none;
+  width: calc(100% - 20px);
+}
+
+.composer-textarea:focus {
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.15);
+}
+
+.composer-prompt {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: rgba(16, 185, 129, 0.08);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  font-size: 12px;
+  color: #a7f3d0;
+  line-height: 1.5;
+}
+
+.composer-prompt-icon {
+  font-size: 16px;
+  flex-shrink: 0;
+}
+
+/* Static email field (attachments) */
+.email-field {
+  margin-bottom: 6px;
+  font-size: 13px;
+  padding: 4px 10px;
+}
+.email-field strong {
+  color: var(--text-muted);
 }
 
 .card-actions {
@@ -283,7 +368,7 @@ body {
 
 /* Revision Section */
 .revision-box {
-  margin-top: 12px;
+  margin-top: 8px;
   display: flex;
   gap: 8px;
 }
@@ -307,11 +392,15 @@ body {
   margin: 8px 0;
 }
 .action-list li {
-  padding: 6px 10px;
+  padding: 8px 12px;
   background: #0d131f;
+  border: 1px solid var(--border-color);
   border-radius: 6px;
-  margin-bottom: 6px;
+  margin-bottom: 8px;
   font-size: 13px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* Tips Box */

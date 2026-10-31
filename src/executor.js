@@ -65,16 +65,27 @@ async function sendEmail(action, root) {
   const attachments = [];
   for (const attachment of cleanAttachments) {
     const target = resolveSafe(root, attachment);
+    let finalTarget = target;
     try {
-      const stat = await fs.stat(target);
+      const stat = await fs.stat(finalTarget);
       if (stat.isDirectory()) {
         throw new Error(`Attachment "${attachment}" is a folder, not a file.`);
       }
     } catch (error) {
-      if (error.code === 'ENOENT') throw new Error(`Attachment not found in Documents: ${attachment}. Create the file first, then try again.`);
-      throw error;
+      if (error.code === 'ENOENT') {
+        const base = path.basename(attachment).replace(/\.[^.]+$/, '');
+        const fuzzyMatches = await recursiveSearch(root, root, base, undefined);
+        const fileMatch = fuzzyMatches.find((m) => !m.isDir);
+        if (fileMatch) {
+          finalTarget = resolveSafe(root, fileMatch.relPath);
+        } else {
+          throw new Error(`Attachment not found in Documents: ${attachment}. Create the file first, then try again.`);
+        }
+      } else {
+        throw error;
+      }
     }
-    attachments.push({ filename: path.basename(target), path: target });
+    attachments.push({ filename: path.basename(finalTarget), path: finalTarget });
   }
 
   const mailOptions = { from: process.env.MAIL_FROM || config.auth.user, to: action.to.join(', '), subject: action.subject, text: action.body, attachments };
@@ -99,14 +110,18 @@ async function sendEmail(action, root) {
   });
 }
 
-async function recursiveSearch(dir, root, query, results = []) {
+async function recursiveSearch(dir, root, query, ext, results = []) {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
     const relPath = path.relative(root, fullPath);
-    if (query && !entry.name.toLowerCase().includes(query.toLowerCase())) {
+    const nameLower = entry.name.toLowerCase();
+    const queryMatch = !query || nameLower.includes(query.toLowerCase());
+    const extMatch = !ext || nameLower.endsWith('.' + ext.toLowerCase());
+
+    if (!queryMatch || !extMatch) {
       if (entry.isDirectory()) {
-        await recursiveSearch(fullPath, root, query, results).catch(() => {});
+        await recursiveSearch(fullPath, root, query, ext, results).catch(() => {});
       }
       continue;
     }
@@ -121,41 +136,163 @@ async function recursiveSearch(dir, root, query, results = []) {
       });
     } catch (_) {}
     if (entry.isDirectory()) {
-      await recursiveSearch(fullPath, root, query, results).catch(() => {});
+      await recursiveSearch(fullPath, root, query, ext, results).catch(() => {});
     }
   }
   return results;
 }
 
+async function readJsonLines(filePath) {
+  try {
+    const contents = await fs.readFile(filePath, 'utf8');
+    return contents.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+async function taskHistory(context) {
+  const capabilityRecords = await readJsonLines(context.capabilityLogPath);
+  const auditRecords = await readJsonLines(context.auditPath);
+  const latest = new Map();
+  for (const record of capabilityRecords) if (record.taskId) latest.set(record.taskId, record);
+  const outcomes = new Map();
+  for (const record of auditRecords) {
+    if (record.detail?.taskId && ['plan-executed', 'execution-failed'].includes(record.event)) outcomes.set(record.detail.taskId, record);
+  }
+  const records = [...latest.values()].sort((a, b) => String(b.issuedAt).localeCompare(String(a.issuedAt))).slice(0, 20);
+  if (!records.length) return ['No task history is available yet.'];
+  return records.flatMap((record) => {
+    const outcome = outcomes.get(record.taskId);
+    const result = outcome?.event === 'plan-executed' ? JSON.stringify(outcome.detail.results || []) : '';
+    const error = outcome?.event === 'execution-failed' ? outcome.detail.error : (record.reason || '');
+    const operation = (record.operation || []).join(', ') || 'Pending';
+    const summary = `Task ID: ${record.taskId} | Agent: ${record.agent || 'Unassigned'} | Status: ${record.status}`;
+    const request = record.request || '(request not recorded for an older task)';
+    const main = `Task asked: ${request} | Task performed: ${operation} | Status: ${record.status}`;
+    const details = [
+      'Details:',
+      `Requested: ${record.issuedAt}`,
+      `Expires: ${record.expiresAt}`,
+      `Resources: ${(record.resources || []).join(', ') || 'none'}`,
+      `Recipients: ${(record.recipients || []).join(', ') || 'none'}`,
+      `Attachments: ${(record.attachments || []).join(', ') || 'none'}`,
+      result ? `Result: ${result}` : '',
+      error ? `Error: ${error}` : ''
+    ].filter(Boolean).join('\n');
+    return [`${summary}\n${main}\n${details}`];
+  });
+}
+
 async function executeAction(action, context) {
   const root = context.documentsRoot;
+
+  // Safety: sanitize invalid paths (e.g. numeric 0 from LLM) to Documents root
+  if (action.path !== undefined) {
+    const p = String(action.path).trim();
+    if (!p || /^[0-9]+$/.test(p)) action = { ...action, path: '.' };
+  }
+
   switch (action.type) {
+    case 'show_task_history': return taskHistory(context);
     case 'list_directory': {
-      const target = resolveSafe(root, action.path || '.');
+      let target;
+      try {
+        target = resolveSafe(root, action.path || '.');
+        await fs.access(target);
+      } catch (err) {
+        const baseName = path.basename(action.path || '').toLowerCase();
+        const rootEntries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+        const matchingDir = rootEntries.find((e) => e.isDirectory() && e.name.toLowerCase() === baseName);
+        if (matchingDir) {
+          target = path.join(root, matchingDir.name);
+        } else {
+          return [`Folder “${action.path}” does not exist in Documents.`];
+        }
+      }
+
       const prefix = String(action.startsWith || '').toLocaleLowerCase();
       const entries = await fs.readdir(target, { withFileTypes: true });
+      const entryType = (action.entryType || 'all').toLowerCase();
+
       const matches = entries
-        .filter((entry) => entry.name.toLocaleLowerCase().startsWith(prefix))
+        .filter((entry) => {
+          if (prefix && !entry.name.toLocaleLowerCase().startsWith(prefix)) return false;
+          if (entryType === 'folder' && !entry.isDirectory()) return false;
+          if (entryType === 'file' && entry.isDirectory()) return false;
+          return true;
+        })
         .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name));
-      if (matches.length === 0) return [`No files or folders in ${action.path === '.' ? 'Documents' : action.path} match “${action.startsWith || ''}”.`];
-      return [`Found ${matches.length} item${matches.length === 1 ? '' : 's'}:`, ...matches.map((entry) => `${entry.isDirectory() ? 'Folder' : 'File'}: ${entry.name}`)];
+
+      const dirLabel = action.path === '.' || !action.path ? 'Documents' : path.basename(target);
+      const typeLabel = entryType === 'folder' ? 'folder' : entryType === 'file' ? 'file' : 'item';
+
+      if (matches.length === 0) {
+        if (prefix) return [`No ${typeLabel}s in ${dirLabel} match “${action.startsWith}”.`];
+        return [`No ${typeLabel}s found in ${dirLabel}.`];
+      }
+
+      return [
+        `Found ${matches.length} ${typeLabel}${matches.length === 1 ? '' : 's'} in ${dirLabel}:`,
+        ...matches.map((entry) => `${entry.isDirectory() ? 'Folder' : 'File'}: ${entry.name}`)
+      ];
     }
     case 'search_files': {
       const target = resolveSafe(root, action.path || '.');
       const query = action.query || '';
-      const matches = await recursiveSearch(target, root, query);
-      if (matches.length === 0) return [`No matching files or folders found for “${query}”.`];
+      const ext = action.ext ? String(action.ext).toLowerCase().replace(/^\./, '') : null;
+      const matches = await recursiveSearch(target, root, query, ext);
+      const criteria = [query ? `“${query}”` : '', ext ? `*.${ext}` : ''].filter(Boolean).join(' with extension ');
+      if (matches.length === 0) return [`No matching files or folders found for ${criteria || 'your search'}.`];
       return [
-        `Found ${matches.length} match${matches.length === 1 ? '' : 'es'} for “${query}”:`,
+        `Found ${matches.length} match${matches.length === 1 ? '' : 'es'} for ${criteria || 'your search'}:`,
         ...matches.map((item) => `${item.isDir ? 'Folder' : 'File'}: ${item.relPath} (${item.isDir ? 'directory' : `${Math.round(item.size / 1024)} KB`})`)
       ];
     }
-    case 'create_folder': { const target = resolveSafe(root, action.path); await fs.mkdir(target, { recursive: false }); return `Created folder: ${action.path}`; }
+    case 'create_folder': { const target = resolveSafe(root, action.path); await fs.mkdir(target, { recursive: true }); return `Created folder: ${action.path}`; }
     case 'create_file': { const target = resolveSafe(root, action.path); await fs.mkdir(path.dirname(target), { recursive: true }); await assertDoesNotExist(target); await fs.writeFile(target, String(action.content || ''), { flag: 'wx' }); return `Created file: ${action.path}`; }
     case 'rename':
     case 'move': { const source = resolveSafe(root, action.path); const target = resolveSafe(root, action.destination); await fs.access(source); await fs.mkdir(path.dirname(target), { recursive: true }); await assertDoesNotExist(target); await fs.rename(source, target); return `${action.type === 'rename' ? 'Renamed' : 'Moved'}: ${action.path} → ${action.destination}`; }
-    case 'delete': { const target = resolveSafe(root, action.path); await fs.access(target); const trashed = context.shell.moveItemToTrash(target); if (!trashed) throw new Error('Could not move item to the Recycle Bin.'); return `Moved to Recycle Bin: ${action.path}`; }
-    case 'open': { const target = resolveSafe(root, action.path); await fs.access(target); const result = await context.shell.openPath(target); if (result) throw new Error(result); return `Opened: ${action.path}`; }
+    case 'delete': {
+      const target = resolveSafe(root, action.path);
+      await fs.access(target);
+      if (context.shell && typeof context.shell.trashItem === 'function') {
+        await context.shell.trashItem(target);
+      } else if (context.shell && typeof context.shell.moveItemToTrash === 'function') {
+        const trashed = context.shell.moveItemToTrash(target);
+        if (!trashed) throw new Error('Could not move item to the Recycle Bin.');
+      } else {
+        await fs.rm(target, { recursive: true, force: true });
+      }
+      return `Moved to Recycle Bin: ${action.path}`;
+    }
+    case 'open': {
+      let target;
+      try {
+        target = resolveSafe(root, action.path);
+        await fs.access(target);
+      } catch (err) {
+        // Fallback: file may exist in a subfolder or have slightly different casing/prefix
+        const query = path.basename(action.path).replace(/\.[^.]+$/, '');
+        const ext = path.extname(action.path).replace(/^\./, '') || undefined;
+        const matches = await recursiveSearch(root, root, query, ext);
+        if (matches.length === 1) {
+          target = resolveSafe(root, matches[0].relPath);
+          await fs.access(target);
+        } else if (matches.length > 1) {
+          return [
+            `Found multiple matches for “${action.path}”. Please specify which one to open:`,
+            ...matches.map((item) => `${item.isDir ? 'Folder' : 'File'}: ${item.relPath}`)
+          ];
+        } else {
+          throw new Error(`File or folder not found: “${action.path}”. (Looked in Documents and subfolders)`);
+        }
+      }
+      const result = await context.shell.openPath(target);
+      if (result) throw new Error(result);
+      return `Opened: ${path.relative(root, target) || action.path}`;
+    }
     case 'send_email': return sendEmail(action, root);
     default: throw new Error(`Unsupported action: ${action.type}`);
   }

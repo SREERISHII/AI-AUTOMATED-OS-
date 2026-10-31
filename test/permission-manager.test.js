@@ -19,3 +19,6 @@ assert.equal(normalizeDocumentsPath('Documents'), '.');
 assert.equal(normalizeDocumentsPath('Documents/invoice.pdf'), 'invoice.pdf');
 console.log('Permission-manager tests passed.');
 
+
+
+

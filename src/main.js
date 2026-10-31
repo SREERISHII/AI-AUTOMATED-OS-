@@ -5,10 +5,14 @@ const os = require('os');
 const { buildPlan, buildEmailRevision } = require('./planner');
 const { checkPlan } = require('./permission-manager');
 const { executePlan } = require('./executor');
+const { CapabilityManager } = require('./capability-manager');
 
 let window;
 const documentsRoot = path.resolve(path.join(os.homedir(), 'Documents'));
 const auditPath = path.join(app.getPath('userData'), 'audit.jsonl');
+const capabilityLogPath = path.join(app.getPath('userData'), 'capabilities.jsonl');
+const capabilitySecretPath = path.join(app.getPath('userData'), 'capability-secret.key');
+const capabilityManager = new CapabilityManager(capabilityLogPath, capabilitySecretPath);
 
 function showWindow() {
   if (!window) return;
@@ -45,25 +49,69 @@ app.on('window-all-closed', (event) => event.preventDefault());
 app.on('will-quit', () => globalShortcut.unregisterAll());
 
 ipcMain.handle('agent:plan', async (_event, request) => {
+  const task = await capabilityManager.startTask(String(request || ''));
   const plan = await buildPlan(String(request || ''), documentsRoot);
   const permission = checkPlan(plan, documentsRoot);
-  await writeAudit('plan-created', { request, planner: plan.planner, allowed: permission.allowed, reasons: permission.reasons });
-  return { plan, permission, documentsRoot };
+  if (!plan.actions?.length) {
+    const reply = plan.reply || plan.summary || 'Hello! How can I assist you?';
+    await writeAudit('conversation-replied', { request, planner: plan.planner, reply });
+    return { plan: { ...plan, reply }, permission: { ...permission, allowed: true, reasons: [], requiresConfirmation: false }, documentsRoot, capability: null };
+  }
+  if (!permission.allowed) {
+    await capabilityManager.reject(task, permission.reasons.join('; '));
+    await writeAudit('plan-created', { taskId: task.taskId, request, planner: plan.planner, allowed: false, reasons: permission.reasons });
+    return { plan, permission, documentsRoot, capability: null };
+  }
+  const capability = await capabilityManager.issue(task, plan);
+  await writeAudit('plan-created', { taskId: task.taskId, expiresAt: task.expiresAt, request, planner: plan.planner, allowed: true, reasons: permission.reasons });
+  return { plan, permission, documentsRoot, capability };
 });
 
 ipcMain.handle('agent:revise-email', async (_event, { draft, instruction }) => {
-  const revisedAction = await buildEmailRevision(draft, instruction);
+  const task = await capabilityManager.startTask(`Revise email: ${String(instruction || '')}`);
+  let revisedAction;
+  try {
+    revisedAction = await buildEmailRevision(draft, instruction);
+  } catch (error) {
+    await capabilityManager.reject(task, error.message);
+    await writeAudit('email-revision-failed', { taskId: task.taskId, instruction, error: error.message });
+    throw error;
+  }
   const plan = { summary: 'Revised email draft', actions: [revisedAction], planner: 'ollama:email-revision' };
   const permission = checkPlan(plan, documentsRoot);
-  await writeAudit('email-revised', { instruction, draft: revisedAction, allowed: permission.allowed, reasons: permission.reasons });
-  return { plan, permission, documentsRoot };
+  if (!permission.allowed) {
+    await capabilityManager.reject(task, permission.reasons.join('; '));
+    return { plan, permission, documentsRoot, capability: null };
+  }
+  const capability = await capabilityManager.issue(task, plan);
+  await writeAudit('email-revised', { taskId: task.taskId, expiresAt: task.expiresAt, instruction, draft: revisedAction, allowed: true, reasons: permission.reasons });
+  return { plan, permission, documentsRoot, capability };
 });
 
-ipcMain.handle('agent:execute', async (_event, plan) => {
+ipcMain.handle('agent:approve-draft', async (_event, draft) => {
+  const task = await capabilityManager.startTask('User manually edited email draft');
+  const plan = { summary: 'Send email', actions: [draft], planner: 'user:manual-edit' };
+  const permission = checkPlan(plan, documentsRoot);
+  if (!permission.allowed) {
+    await capabilityManager.reject(task, permission.reasons.join('; '));
+    throw new Error(`Draft blocked: ${permission.reasons.join('; ')}`);
+  }
+  const capability = await capabilityManager.issue(task, plan);
+  await writeAudit('draft-approved', { taskId: task.taskId, draft, allowed: true });
+  return { plan, capability };
+});
+
+ipcMain.handle('agent:execute', async (_event, { plan, capability }) => {
   const permission = checkPlan(plan, documentsRoot);
   if (!permission.allowed) throw new Error(`Blocked by permission manager: ${permission.reasons.join('; ')}`);
-  const results = await executePlan(plan, { documentsRoot, shell });
-  await writeAudit('plan-executed', { actions: plan.actions, results });
-  return results;
+  await capabilityManager.consume(capability, plan);
+  try {
+    const results = await executePlan(plan, { documentsRoot, shell, capabilityLogPath, auditPath });
+    await writeAudit('plan-executed', { taskId: capability.taskId, actions: plan.actions, results });
+    return results;
+  } catch (error) {
+    await writeAudit('execution-failed', { taskId: capability.taskId, actions: plan.actions, error: error.message });
+    throw error;
+  }
 });
 

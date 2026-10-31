@@ -6,7 +6,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron .",
-    "test": "node test/permission-manager.test.js"
+    "test": "node test/permission-manager.test.js && node test/capability-manager.test.js && node test/planner.test.js"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
