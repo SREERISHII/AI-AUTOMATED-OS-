@@ -35,6 +35,40 @@ assert(isCapabilityRequest('help'));
 assert(!isCapabilityRequest('delete what can you do.txt'));
 console.log('Planner capability query tests passed.');
 
+const {
+  hasExplicitAttachmentRequest,
+  extractExplicitAttachments,
+  extractExplicitEmailBody,
+  formatExplicitEmailBody,
+  enforceEmailRequestConstraints,
+} = require('../src/planner');
+
+assert.strictEqual(hasExplicitAttachmentRequest("mail friend@example.com about thirukumaran's bday celebration"), false);
+assert.strictEqual(hasExplicitAttachmentRequest('mail friend@example.com and attach resume.pdf'), true);
+assert.deepStrictEqual(extractExplicitAttachments('attach SREERISHI_RESUME and mail to friend@example.com'), ['SREERISHI_RESUME']);
+assert.deepStrictEqual(extractExplicitAttachments("mail friend@example.com about thirukumaran's bday celebration"), []);
+assert.strictEqual(extractExplicitEmailBody('mail friend@example.com and genrate the body as, am inviting you to my dear friend thirukumaran\'s bday celebration'), "am inviting you to my dear friend thirukumaran's bday celebration");
+assert(formatExplicitEmailBody("am inviting you to my dear friend thirukumaran's bday celebration").includes("thirukumaran's bday celebration"));
+const constrainedDraft = enforceEmailRequestConstraints({
+  type: 'send_email',
+  to: ['friend@example.com'],
+  subject: 'Birthday Celebration',
+  body: 'And genrate the body as, am inviting you to my dear friend thirukumaran\'s bday celebration',
+  attachments: ['s bday celebration']
+}, 'mail friend@example.com and genrate the body as, am inviting you to my dear friend thirukumaran\'s bday celebration');
+assert.deepStrictEqual(constrainedDraft.attachments, []);
+assert(!/genrate the body as/i.test(constrainedDraft.body));
+assert(constrainedDraft.body.includes("thirukumaran's bday celebration"));
+const attachmentDraft = enforceEmailRequestConstraints({
+  type: 'send_email',
+  to: ['friend@example.com'],
+  subject: 'Updated Resume',
+  body: 'Please find my updated resume attached.',
+  attachments: []
+}, 'attach SREERISHI_RESUME and mail to friend@example.com and the body as updated resume');
+assert.deepStrictEqual(attachmentDraft.attachments, ['SREERISHI_RESUME']);
+console.log('Planner email intent guard tests passed.');
+
 (async () => {
   const plan = await buildPlan('SHOW ME THE TASK HISTORY', 'C:\\dummy');
   assert.equal(plan.actions.length, 1);

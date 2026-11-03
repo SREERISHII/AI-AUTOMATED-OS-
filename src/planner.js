@@ -454,34 +454,69 @@ function normalizeEmailAction(action) {
 
 function applyLocalRevisionFallback(currentDraft, instruction) {
   const request = String(instruction || '').toLowerCase();
-  const originalBody = normalizeEmailText(currentDraft.body || '');
   const parsed = parseEmailParts(currentDraft.body);
 
-  if (!parsed.greeting) parsed.greeting = 'Dear Sir/Madam,';
+  // Only set defaults if the parsed values are truly absent
   if (!parsed.signoff) parsed.signoff = 'Sincerely,';
   if (!parsed.senderName) parsed.senderName = 'User';
+  // NEVER overwrite an existing greeting — it causes duplicates
+  if (!parsed.greeting) parsed.greeting = 'Dear Sir/Madam,';
 
-  if (/return|come back|back tomorrow/.test(request)) {
+  // --- Body replacement instructions ---
+  // "change the body" / "rewrite" / "accident" / "emergency" context
+  const wantsBodyChange = /\b(change|update|rewrite|replace|edit)\b.*\bbody\b|\bbody\b.*\b(change|update|rewrite|replace|edit)\b/i.test(request);
+  const isAccidentContext = /\b(accident|met with an accident|injured|emergency|hospital|hurt|crash)\b/i.test(request);
+  const isAccidentDraft  = /\b(accident|met with an accident|injured|emergency|hospital|hurt|crash)\b/i.test(currentDraft.body || '');
+
+  if (wantsBodyChange || (isAccidentContext && !isAccidentDraft)) {
+    if (isAccidentContext || isAccidentDraft) {
+      parsed.paragraphs = [
+        'I am writing to inform you that I have met with an accident and am currently unable to attend to my responsibilities.',
+        'I will keep you updated on my condition and recovery as soon as possible.',
+        'I apologize for any inconvenience this may cause and appreciate your understanding.'
+      ];
+    } else {
+      // Generic body replacement — preserve the first paragraph intent and apply the instruction text
+      const intentText = request
+        .replace(/^(change|update|rewrite|replace|edit)\s+(the\s+)?body\s*/i, '')
+        .replace(/\b(tell|say|mention)\s+(that|them|him|her)?\s*/i, '')
+        .trim();
+      if (intentText) {
+        parsed.paragraphs = [intentText.charAt(0).toUpperCase() + intentText.slice(1)];
+      }
+    }
+    parsed.signoff = parsed.signoff || 'Sincerely,';
+    return normalizeEmailAction({ ...currentDraft, body: assembleEmail(parsed) });
+  }
+
+  // --- Additive revision instructions ---
+  if (/\b(return|come back|back tomorrow)\b/.test(request)) {
     const sentence = 'I expect to return tomorrow and will resume my responsibilities then.';
     if (!parsed.paragraphs.some(p => /return|come back|back tomorrow/i.test(p))) parsed.paragraphs.push(sentence);
   }
-  if (/approval|approve|permission/.test(request)) {
+  if (/\b(approval|approve|permission)\b/.test(request)) {
     const sentence = 'I kindly request your approval for this leave.';
     if (!parsed.paragraphs.some(p => /approval|approve|permission/i.test(p))) parsed.paragraphs.push(sentence);
   }
-  if (/formal|professional|official|tone/.test(request)) {
+  if (/\b(formal|professional|official|tone)\b/.test(request)) {
     if (/^(hi|hello)\b/i.test(parsed.greeting)) parsed.greeting = 'Dear Sir/Madam,';
     parsed.signoff = 'Sincerely,';
     if (!parsed.paragraphs.some(p => /respectfully|consideration/i.test(p))) {
-      parsed.paragraphs.push('I respectfully request your consideration of this leave.');
-    } else if (!parsed.paragraphs.some(p => /additional information|further information/i.test(p))) {
-      parsed.paragraphs.push('Please let me know if any additional information is required.');
+      parsed.paragraphs.push('I respectfully request your consideration.');
     }
   }
+  if (/\b(shorter|concise|brief)\b/.test(request)) {
+    parsed.paragraphs = parsed.paragraphs.slice(0, 1);
+  }
+  if (/\b(longer|expand|elaborate|more detail)\b/.test(request)) {
+    parsed.paragraphs.push('Please do not hesitate to contact me should you require any further information.');
+  }
 
+  const originalBody = normalizeEmailText(currentDraft.body || '');
   let revised = normalizeEmailAction({ ...currentDraft, body: assembleEmail(parsed) });
+  // Last resort: if nothing changed, add a polite closing sentence
   if (revised.body === originalBody) {
-    parsed.paragraphs.push('Thank you for your consideration.');
+    parsed.paragraphs.push('Thank you for your understanding.');
     revised = normalizeEmailAction({ ...currentDraft, body: assembleEmail(parsed) });
   }
   return revised;
@@ -552,10 +587,13 @@ function extractTargetFolder(text) {
   }
 
   // "folder/directory named/called/name [name]" (e.g. "show folder name 00AA", "open folder 0 IT")
-  const mFolderNamed = /(?:folder|directory)\s+(?:named\s+|called\s+|name\s+as\s+|name\s+)?["']?([a-zA-Z0-9_ -]+?)["']?(?:\s+(?:folder|directory)|\s*$|[.?!])/i.exec(clean);
-  if (mFolderNamed) {
-    const f = mFolderNamed[1].trim();
-    if (!/^(documents?|my documents?|all|this|rhis|thsi|tihs|here|it|the|name|folder|directory|alone|only)$/i.test(f)) return f;
+  // Guard: do NOT treat create/make/delete/remove commands as a target-folder reference.
+  if (!/^(?:create|make|delete|remove|rename|move)\b/i.test(clean)) {
+    const mFolderNamed = /(?:folder|directory)\s+(?:named\s+|called\s+|name\s+as\s+|name\s+)?["']?([a-zA-Z0-9_ -]+?)["']?(?:\s+(?:folder|directory)|\s*$|[.?!])/i.exec(clean);
+    if (mFolderNamed) {
+      const f = mFolderNamed[1].trim();
+      if (!/^(documents?|my documents?|all|this|rhis|thsi|tihs|here|it|the|name|folder|directory|alone|only)$/i.test(f)) return f;
+    }
   }
 
   // Direct: "show/list/open [name]"
@@ -638,6 +676,72 @@ function filterValidAttachments(attachments) {
   return list
     .map(normalizeDocumentsPath)
     .filter(item => typeof item === 'string' && item.trim() !== '' && item.trim() !== '.' && !invalidPlaceholders.has(item.toLowerCase()));
+}
+
+// User intent is the source of truth for attachments.  A small model can
+// otherwise mistake ordinary prose (especially names containing apostrophes)
+// for a filename or attachment.
+function hasExplicitAttachmentRequest(request) {
+  const text = String(request || '').toLowerCase();
+  return /\b(?:attach|attachment|attachments|enclos(?:e|ed|ing)|include\s+(?:the\s+)?(?:file|document)|with\s+(?:the\s+)?(?:file|document))\b/.test(text);
+}
+
+function extractExplicitAttachments(request) {
+  const text = String(request || '').trim();
+  if (!hasExplicitAttachmentRequest(text)) return [];
+  const matches = [];
+  const pattern = /\b(?:attach|include|enclos(?:e|ed|ing))\s+(?:the\s+)?(?:file\s+|document\s+|named\s+)?["']?([^"',.;\n]+?)["']?(?=\s+(?:and|with|to|as|that|body)\b|[,.;]|$)/gi;
+  let match;
+  while ((match = pattern.exec(text))) {
+    const candidate = String(match[1] || '').trim();
+    if (candidate && !/^(?:file|document|attachment|attachments)$/i.test(candidate)) matches.push(candidate);
+  }
+  return Array.from(new Set(matches));
+}
+
+function extractExplicitEmailBody(request) {
+  const text = String(request || '').trim();
+  const match = /(?:generate|genrate|create|draft|write|make)\s+(?:the\s+)?(?:email\s+)?body\s+(?:as|:)\s*[,;:\\s]*([\s\S]+)$/i.exec(text);
+  if (!match) return null;
+  let body = match[1].trim();
+  // Remove only matching outer quotes. Do not strip apostrophes inside names.
+  if ((body.startsWith('"') && body.endsWith('"')) || (body.startsWith("'") && body.endsWith("'"))) {
+    body = body.slice(1, -1).trim();
+  }
+  return body || null;
+}
+
+function formatExplicitEmailBody(body) {
+  const cleaned = String(body || '').trim();
+  if (!cleaned) return cleaned;
+  const normalized = normalizeEmailText(cleaned);
+  // Preserve a complete user-supplied email, but wrap a message fragment in a
+  // clean draft so the composer never shows command text as the email body.
+  if (/^(?:dear|hi|hello|respected|to whom)/i.test(normalized) && /(?:regards|sincerely|thank you)[,!]?\s*(?:\n|$)/i.test(normalized)) {
+    return normalized;
+  }
+  const sentence = /^[A-Z]/.test(normalized) ? normalized : normalized.charAt(0).toUpperCase() + normalized.slice(1);
+  return `Dear Friend,\n\n${/[.!?]$/.test(sentence) ? sentence : `${sentence}.`}\n\nBest regards,\nUser`;
+}
+
+function enforceEmailRequestConstraints(action, request) {
+  const next = { ...action };
+  const explicitAttachments = extractExplicitAttachments(request);
+  // Explicit user attachment instructions override model guesses. This also
+  // supports a basename such as "SREERISHI_RESUME"; the resolver later maps
+  // it to the unique matching file (for example, .pdf) in Documents.
+  next.attachments = explicitAttachments.length
+    ? explicitAttachments
+    : [];
+
+  const explicitBody = extractExplicitEmailBody(request);
+  if (explicitBody) {
+    const generatedBody = String(next.body || '');
+    const commandEcho = /(?:generate|genrate|create|draft|write|make)\s+(?:the\s+)?(?:email\s+)?body\s+(?:as|:)/i.test(generatedBody)
+      || /^(?:and\s+)?genrate\b/i.test(generatedBody.trim());
+    if (commandEcho || !generatedBody.trim()) next.body = formatExplicitEmailBody(explicitBody);
+  }
+  return next;
 }
 
 async function collectFiles(root, current = root, result = []) {
@@ -839,9 +943,13 @@ function extractSearchIntent(text) {
 // ---------------------------------------------------------------------------
 function fallbackPlan(request) {
   const text = request.trim();
-  const quoted = /["']([^"']+)["']/.exec(text)?.[1];
+  // BUG FIX: only match SAME quote type to avoid cross-matching (e.g. thirukumaran's ... ")
+  const quotedMatch = /"([^"]+)"/.exec(text) || /'([^']+)'/.exec(text);
+  const quoted = quotedMatch?.[1];
   const pathMatch = /(Documents[\\/][^,]+|[\w .-]+\.(?:txt|pdf|docx|xlsx|png|jpg|jpeg))/i.exec(text);
-  const item = quoted || pathMatch?.[1]?.replace(/^Documents[\\/]/i, '') || '';
+  // Only treat quoted content as an item if it looks like a filename (has extension or is short and path-like)
+  const quotedIsFilename = quoted && /\.(txt|pdf|docx|xlsx|png|jpg|jpeg|csv|pptx?)$/i.test(quoted);
+  const item = (quotedIsFilename ? quoted : null) || pathMatch?.[1]?.replace(/^Documents[\\/]/i, '') || '';
   const attachmentMatch = /\battach(?:ing)?\s+(?:file\s+)?(?:named\s+)?([a-zA-Z0-9_-]+)\s*\.?\s*(pdf|pds|doc|docx|txt|xlsx|png|jpg|jpeg)\b/i.exec(text);
   const requestedAttachment = attachmentMatch ? `${attachmentMatch[1]}.${attachmentMatch[2]}` : (pathMatch?.[1] || '');
   const lower = text.toLowerCase();
@@ -853,14 +961,98 @@ function fallbackPlan(request) {
   if (/\b(email|send email|mail)\b/.test(lower)) {
     const to = emailMatch ? [emailMatch[1]] : [];
     const isLeave = /\b(leave|condolence|condolence ceremony|absent|day off)\b/.test(lower);
+    const isAccident = /\b(accident|met with an accident|injured|emergency|hospital|hurt|crash)\b/.test(lower);
+    const isResignation = /\b(resign|resignation|quit|leaving the job|notice period)\b/.test(lower);
+    const isMeeting = /\b(meeting|schedule|reschedule|postpone|cancel the meeting)\b/.test(lower);
+
+    let subject, body;
+    if (isLeave && isAccident) {
+      // Leave requested specifically because of an accident — combine both contexts
+      subject = 'Leave Request for Today – Met with an Accident';
+      body = 'Dear Sir/Madam,\n\nI am writing to inform you that I have met with an accident and am unable to attend office today. I kindly request you to grant me leave for today.\n\nI will keep you updated on my condition and will resume work as soon as I recover. I apologize for any inconvenience caused and appreciate your understanding.\n\nBest regards,\nUser';
+    } else if (isAccident) {
+      subject = 'Urgent: I Have Met with an Accident';
+      body = 'Dear Sir/Madam,\n\nI am writing to inform you that I have met with an accident and am currently unable to attend to my responsibilities. I will keep you updated on my condition and recovery.\n\nI apologize for any inconvenience this may cause and appreciate your understanding.\n\nBest regards,\nUser';
+    } else if (isLeave) {
+      subject = 'Leave Request for Today';
+      body = 'Dear Sir/Madam,\n\nI am writing to request leave for today due to a personal matter. I would be grateful if you could approve my leave request.\n\nThank you for your understanding.\n\nBest regards,\nUser';
+    } else if (isResignation) {
+      subject = 'Resignation Notice';
+      body = 'Dear Sir/Madam,\n\nI am writing to formally notify you of my resignation. Please accept this letter as my official notice.\n\nThank you for the opportunity to work with you.\n\nBest regards,\nUser';
+    } else if (isMeeting) {
+      subject = 'Meeting Update';
+      body = 'Dear Sir/Madam,\n\nI am writing to inform you about a change regarding our upcoming meeting. Please let me know a convenient time to reschedule.\n\nBest regards,\nUser';
+    } else {
+      // --- Detect "generate body as [content]" / "body as [content]" explicit override ---
+      const explicitBodyMatch = /(?:generate\s+(?:the\s+)?body\s+as\s*[,:]?\s*|body\s+as\s*[,:]?\s*|body\s*:\s*|body\s+content\s*:\s*|body\s*=\s*)(.+)/i.exec(text);
+      const explicitBody = explicitBodyMatch
+        ? explicitBodyMatch[1].replace(/^["']|["']$/g, '').trim()
+        : null;
+
+      // --- Detect invitation / celebration context ---
+      const isInvitation = /\b(invit|invitation|invite|dinner|party|celebration|birthday|bday|gathering|event|function|ceremony|feast|lunch|brunch|get[-\s]?together)\b/i.test(lower);
+      const isCelebration = /\b(birthday|bday|birth\s+day|celebrate|celebration|anniversary)\b/i.test(lower);
+      // Extract name if mentioned (e.g. "thirukumaran's bday")
+      const nameMatch = /\b([A-Z][a-z]{2,}(?:'s)?)\s+(?:birthday|bday|celebration|party|dinner|function)/i.exec(text);
+      const celebrantName = nameMatch ? nameMatch[1].replace(/'s$/, '') : null;
+
+      // --- Strip command noise words from the user's intent ---
+      const intentText = text
+        .replace(/\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b/g, '')
+        .replace(/^(mail|email|send\s+(?:an?\s+)?(?:email|mail)|write\s+(?:an?\s+)?(?:email|mail))\s+(?:to\s+)?/i, '')
+        .replace(/\b(?:and\s+)?(?:generate|genrate|create|draft|write|make)\s+(?:the\s+)?body\s+(?:as\s*[,:]?\s*|:\s*)/i, '')
+        .replace(/\b(to\s+)?(?:tell|say|inform|notify)\s+(?:that|them|him|her|you)?\s*/i, '')
+        .replace(/^(that|which|to|and|the)\s+/i, '')
+        .replace(/["']/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      let subject, body;
+
+      if (explicitBody) {
+        // User provided an explicit body – use it directly, formatted properly
+        const capitalized = explicitBody.charAt(0).toUpperCase() + explicitBody.slice(1);
+        subject = isInvitation ? 'You Are Invited!' : 'Message from Private OS Agent';
+        body = `Dear Friend,\n\n${capitalized}\n\nKindly confirm your presence. Looking forward to seeing you!\n\nBest regards,\nUser`;
+      } else if (isInvitation) {
+        if (isCelebration && celebrantName) {
+          subject = `Invitation to ${celebrantName}'s Birthday Celebration`;
+          body = `Dear Friend,\n\nI am delighted to invite you to the birthday celebration of my dear friend ${celebrantName}. It would be a pleasure to have you join us for this special occasion.\n\nPlease do let me know if you are able to make it. Looking forward to celebrating together!\n\nBest regards,\nUser`;
+        } else if (isCelebration) {
+          subject = 'Invitation to a Birthday Celebration';
+          body = `Dear Friend,\n\nI am excited to invite you to a birthday celebration! It would be wonderful to have you join us for this special occasion.\n\nPlease confirm your attendance at your earliest convenience. Looking forward to celebrating together!\n\nBest regards,\nUser`;
+        } else {
+          // dinner / party / gathering invitation
+          const eventMatch = /\b(dinner|party|gathering|event|function|ceremony|feast|lunch|brunch|get[-\s]?together)\b/i.exec(text);
+          const eventType = eventMatch ? eventMatch[1].toLowerCase() : 'event';
+          const venueMatch = /\b(?:at|in|@)\s+(?:my\s+)?([a-zA-Z0-9 ']+?)(?:\s*[,.'"]|$)/i.exec(intentText);
+          const venue = venueMatch ? venueMatch[1].trim() : 'my residence';
+          subject = `Invitation to ${eventType.charAt(0).toUpperCase() + eventType.slice(1)}`;
+          body = `Dear Friend,\n\nI am pleased to invite you to a ${eventType} at ${venue}. It would be a pleasure to have your company on this occasion.\n\nKindly confirm your presence. Looking forward to seeing you!\n\nBest regards,\nUser`;
+        }
+      } else {
+        // Fully generic — use cleaned intent text as the core message
+        subject = 'Message from Private OS Agent';
+        body = `Dear Sir/Madam,\n\n${intentText ? intentText.charAt(0).toUpperCase() + intentText.slice(1) + '.' : 'I am reaching out to you regarding an important matter.'}\n\nPlease feel free to reach out if you need more information.\n\nBest regards,\nUser`;
+      }
+
+      return {
+        summary: isInvitation ? 'Draft invitation email' : 'Draft email',
+        actions: [{
+          type: 'send_email', to,
+          subject,
+          body,
+          attachments: requestedAttachment ? [requestedAttachment] : []
+        }]
+      };
+    }
+
     return {
-      summary: isLeave ? 'Draft leave email' : 'Draft email',
+      summary: (isLeave && isAccident) ? 'Draft leave email (accident)' : isLeave ? 'Draft leave email' : isAccident ? 'Draft accident notification email' : 'Draft email',
       actions: [{
         type: 'send_email', to,
-        subject: isLeave ? 'Leave Request for Today' : 'Message from Private OS Agent',
-        body: isLeave
-          ? 'Dear Sir/Madam,\n\nI am writing to request leave for today due to a personal matter. I would be grateful if you could approve my leave request.\n\nThank you for your understanding.\n\nBest regards,\nUser'
-          : `Hello,\n\n${text}\n\nBest regards,\nUser`,
+        subject,
+        body,
         attachments: requestedAttachment ? [requestedAttachment] : (item ? [item] : [])
       }]
     };
@@ -926,8 +1118,14 @@ function fallbackPlan(request) {
       return { summary: `Rename "${renameParams.src}" to "${renameParams.dest}"`, actions: [{ type: 'rename', path: renameParams.src, destination: renameParams.dest }] };
     }
   }
-  if (/\bdelete\b|\bremove\b/.test(lower)) {
-    const deletePath = targetFolder ? path.posix.join(targetFolder, item) : item;
+  if (/\bdelete\b|\bremove\b|\btrash\b|\berase\b/.test(lower)) {
+    // Extract the target name: try quoted match, then explicit item, then the word(s) after delete/remove/trash/erase
+    const deleteTarget = item || extractNewItemName(text) || (() => {
+      const m = /(?:delete|remove|trash|erase)\s+(?:folder\s+|file\s+|directory\s+)?["']?([a-zA-Z0-9_ .-]+?)["']?\s*$/i.exec(text.trim());
+      return m ? m[1].trim() : null;
+    })();
+    const deletePath = targetFolder && deleteTarget ? path.posix.join(targetFolder, deleteTarget) : (deleteTarget || item);
+    if (!deletePath) return { summary: 'Conversation', reply: "Please specify what you'd like to delete.", actions: [] };
     return { summary: 'Delete item', actions: [{ type: 'delete', path: deletePath }] };
   }
   return { summary: 'Conversation', reply: "I'm here to help with your Documents files and email tasks. What would you like to do?", actions: [] };
@@ -948,12 +1146,14 @@ CRITICAL RULES:
 
 Action rules:
 1. Every action type must be ONE of: list_directory, search_files, create_folder, create_file, rename, move, delete, open, send_email.
-2. For send_email: generate a complete, professional email body with ONE greeting, clean paragraphs, and ONE sign-off.
-3. For task history: use show_task_history with no path.
-4. For file/folder actions: use relative Documents paths. Use "." for Documents root.
-5. For search: set "query" to the core keyword only. Set "ext" for file type filtering.
-6. When user says "open" for a file or folder, use "open" action (do NOT use list_directory). When user says "show" or "list", use "list_directory".
-7. Propose no more than 3 actions. Return JSON ONLY with no commentary.`;
+2. For send_email: understand the user's intended message, correct obvious spelling/grammar, and generate a complete, natural email with ONE greeting, clean paragraphs, and ONE sign-off. Never copy command wording such as "generate the body as", "genrate the body as", or "body:" into the email body.
+3. For send_email: attachments must be [] unless the user explicitly asks to attach, include, or enclose a file/document. Never infer an attachment from ordinary words, an apostrophe in a person's name, or a celebration/event description.
+4. If the user provides text after "body as" or "generate the body as", treat only that text as the intended message content; remove the instruction prefix and polish it into the email.
+5. For task history: use show_task_history with no path.
+6. For file/folder actions: use relative Documents paths. Use "." for Documents root.
+7. For search: set "query" to the core keyword only. Set "ext" for file type filtering.
+8. When user says "open" for a file or folder, use "open" action (do NOT use list_directory). When user says "show" or "list", use "list_directory".
+9. Propose no more than 3 actions. Return JSON ONLY with no commentary.`;
 
 function isPlanConsistentWithIntent(plan, intent) {
   if (!plan?.actions || plan.actions.length === 0) return true;
@@ -1234,7 +1434,9 @@ async function buildPlan(request, documentsRoot, sessionManager = null) {
       }
 
       const normalizedPlan = normalizePlanPaths({ summary: String(plan.summary || 'Proposed actions'), actions: plan.actions }, cleanText);
-      normalizedPlan.actions = normalizedPlan.actions.map((action) => action.type === 'send_email' ? normalizeEmailAction(action) : action);
+      normalizedPlan.actions = normalizedPlan.actions.map((action) => action.type === 'send_email'
+        ? normalizeEmailAction(enforceEmailRequestConstraints(action, cleanText))
+        : action);
       if (!normalizedPlan.actions || normalizedPlan.actions.length === 0) {
         normalizedPlan.reply = plan.reply || plan.summary || "I'm here to help. What would you like me to do?";
       }
@@ -1278,7 +1480,9 @@ async function buildPlan(request, documentsRoot, sessionManager = null) {
 
   // --- Ollama failed or hallucinated: use deterministic fallback ---
   const fallback = fallbackPlan(cleanText);
-  fallback.actions = fallback.actions.map((action) => action.type === 'send_email' ? normalizeEmailAction(action) : action);
+  fallback.actions = fallback.actions.map((action) => action.type === 'send_email'
+    ? normalizeEmailAction(enforceEmailRequestConstraints(action, cleanText))
+    : action);
   const correctedFallback = await correctAttachmentTypos(fallback, documentsRoot);
   pushHistory('user', text);
   if (correctedFallback.reply) pushHistory('assistant', correctedFallback.reply);
@@ -1458,4 +1662,9 @@ module.exports = {
   conversationContext,
   isOllamaAvailable,
   CAPABILITY_GUIDE,
+  hasExplicitAttachmentRequest,
+  extractExplicitAttachments,
+  extractExplicitEmailBody,
+  formatExplicitEmailBody,
+  enforceEmailRequestConstraints,
 };
