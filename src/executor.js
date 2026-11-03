@@ -40,7 +40,11 @@ async function assertFile(target) {
 // rejectUnauthorized and NODE_TLS_REJECT_UNAUTHORIZED cannot fix this because
 // the certificate is rejected before trust validation even runs.
 // Standalone Node.js uses OpenSSL, which handles these certificates correctly.
-async function sendEmail(action, root) {
+async function sendEmail(action, root, sessionManager) {
+  if (sessionManager && !sessionManager.networkAccessEnabled) {
+    throw new Error('Email sending blocked: Network access is disabled by security policy.');
+  }
+
   const port = Number(process.env.SMTP_PORT || 465);
   const secure = process.env.SMTP_SECURE === 'true' || port === 465;
   const config = {
@@ -105,6 +109,15 @@ async function sendEmail(action, root) {
         reject(new Error(error?.message || stderr || `Email worker error: ${stdout || parseError.message}`));
       }
     });
+
+    if (sessionManager && typeof sessionManager.registerChildProcess === 'function') {
+      try {
+        sessionManager.registerChildProcess(child);
+      } catch (err) {
+        return reject(err);
+      }
+    }
+
     child.stdin.write(JSON.stringify({ config, mailOptions }));
     child.stdin.end();
   });
@@ -187,6 +200,12 @@ async function taskHistory(context) {
 
 async function executeAction(action, context) {
   const root = context.documentsRoot;
+  const sessionManager = context.sessionManager;
+
+  // Session Activity Manager Pre-Execution Safety Verification
+  if (sessionManager) {
+    sessionManager.verifyExecutionEligibility(action, context.approvalId);
+  }
 
   // Safety: sanitize invalid paths (e.g. numeric 0 from LLM) to Documents root
   if (action.path !== undefined) {
@@ -194,8 +213,9 @@ async function executeAction(action, context) {
     if (!p || /^[0-9]+$/.test(p)) action = { ...action, path: '.' };
   }
 
+  let result;
   switch (action.type) {
-    case 'show_task_history': return taskHistory(context);
+    case 'show_task_history': result = await taskHistory(context); break;
     case 'list_directory': {
       let target;
       try {
@@ -233,10 +253,11 @@ async function executeAction(action, context) {
         return [`No ${typeLabel}s found in ${dirLabel}.`];
       }
 
-      return [
+      result = [
         `Found ${matches.length} ${typeLabel}${matches.length === 1 ? '' : 's'} in ${dirLabel}:`,
         ...matches.map((entry) => `${entry.isDirectory() ? 'Folder' : 'File'}: ${entry.name}`)
       ];
+      break;
     }
     case 'search_files': {
       const target = resolveSafe(root, action.path || '.');
@@ -245,13 +266,26 @@ async function executeAction(action, context) {
       const matches = await recursiveSearch(target, root, query, ext);
       const criteria = [query ? `“${query}”` : '', ext ? `*.${ext}` : ''].filter(Boolean).join(' with extension ');
       if (matches.length === 0) return [`No matching files or folders found for ${criteria || 'your search'}.`];
-      return [
+      result = [
         `Found ${matches.length} match${matches.length === 1 ? '' : 'es'} for ${criteria || 'your search'}:`,
         ...matches.map((item) => `${item.isDir ? 'Folder' : 'File'}: ${item.relPath} (${item.isDir ? 'directory' : `${Math.round(item.size / 1024)} KB`})`)
       ];
+      break;
     }
-    case 'create_folder': { const target = resolveSafe(root, action.path); await fs.mkdir(target, { recursive: true }); return `Created folder: ${action.path}`; }
-    case 'create_file': { const target = resolveSafe(root, action.path); await fs.mkdir(path.dirname(target), { recursive: true }); await assertDoesNotExist(target); await fs.writeFile(target, String(action.content || ''), { flag: 'wx' }); return `Created file: ${action.path}`; }
+    case 'create_folder': {
+      const target = resolveSafe(root, action.path);
+      await fs.mkdir(target, { recursive: true });
+      result = `Created folder: ${action.path}`;
+      break;
+    }
+    case 'create_file': {
+      const target = resolveSafe(root, action.path);
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await assertDoesNotExist(target);
+      await fs.writeFile(target, String(action.content || ''), { flag: 'wx' });
+      result = `Created file: ${action.path}`;
+      break;
+    }
     case 'rename':
     case 'move': {
       const source = resolveSafe(root, action.path);
@@ -272,7 +306,8 @@ async function executeAction(action, context) {
       await assertDoesNotExist(target);
       await fs.rename(source, target);
       const displayDest = path.relative(root, target).replace(/\\/g, '/');
-      return `${action.type === 'rename' ? 'Renamed' : 'Moved'}: ${action.path} → ${displayDest}`;
+      result = `${action.type === 'rename' ? 'Renamed' : 'Moved'}: ${action.path} → ${displayDest}`;
+      break;
     }
     case 'delete': {
       const target = resolveSafe(root, action.path);
@@ -285,7 +320,8 @@ async function executeAction(action, context) {
       } else {
         await fs.rm(target, { recursive: true, force: true });
       }
-      return `Moved to Recycle Bin: ${action.path}`;
+      result = `Moved to Recycle Bin: ${action.path}`;
+      break;
     }
     case 'open': {
       let target;
@@ -293,7 +329,6 @@ async function executeAction(action, context) {
         target = resolveSafe(root, action.path);
         await fs.access(target);
       } catch (err) {
-        // Fallback: file may exist in a subfolder or have slightly different casing/prefix
         const query = path.basename(action.path).replace(/\.[^.]+$/, '');
         const ext = path.extname(action.path).replace(/^\./, '') || undefined;
         const matches = await recursiveSearch(root, root, query, ext);
@@ -309,22 +344,87 @@ async function executeAction(action, context) {
           throw new Error(`File or folder not found: “${action.path}”. (Looked in Documents and subfolders)`);
         }
       }
-      const result = await context.shell.openPath(target);
-      if (result) throw new Error(result);
-      return `Opened: ${path.relative(root, target) || action.path}`;
+      const openResult = await context.shell.openPath(target);
+      if (openResult) throw new Error(openResult);
+      result = `Opened: ${path.relative(root, target) || action.path}`;
+      break;
     }
-    case 'send_email': return sendEmail(action, root);
-    default: throw new Error(`Unsupported action: ${action.type}`);
+    case 'send_email':
+      result = await sendEmail(action, root, sessionManager);
+      break;
+    default:
+      throw new Error(`Unsupported action: ${action.type}`);
   }
+
+  // Session Activity Manager Post-Execution Validation
+  if (sessionManager) {
+    if (action.path) {
+      const check = sessionManager.validatePathSafety(action.path);
+      if (!check.safe) {
+        await sessionManager.triggerEmergencyStop({
+          action: action.type,
+          tool: action.type,
+          target: action.path,
+          reason: `Post-execution path validation failed: ${check.reason}`
+        });
+        throw new Error(`Post-execution safety failure: ${check.reason}`);
+      }
+    }
+    if (action.destination) {
+      const checkDest = sessionManager.validatePathSafety(action.destination, { isDestination: true });
+      if (!checkDest.safe) {
+        await sessionManager.triggerEmergencyStop({
+          action: action.type,
+          tool: action.type,
+          target: action.destination,
+          reason: `Post-execution destination validation failed: ${checkDest.reason}`
+        });
+        throw new Error(`Post-execution safety failure: ${checkDest.reason}`);
+      }
+    }
+
+    sessionManager.recordActivity({
+      requestedAction: action,
+      permissionStatus: 'ALLOWED',
+      approvalStatus: 'EXECUTED',
+      currentStatus: 'EXECUTED',
+      actionReason: `Action ${action.type} completed successfully.`
+    });
+  }
+
+  return result;
 }
 
 async function executePlan(plan, context) {
-  const results = [];
-  for (const action of plan.actions) {
-    const actionResults = await executeAction(action, context);
-    results.push(...(Array.isArray(actionResults) ? actionResults : [actionResults]));
+  const sessionManager = context.sessionManager;
+  if (sessionManager) {
+    if (sessionManager.sessionClosed || sessionManager.getState() === 'TERMINATED' || sessionManager.getState() === 'EMERGENCY_STOP') {
+      throw new Error('Execution blocked: Session has been closed or terminated.');
+    }
+    if (sessionManager.getState() === 'SUSPENDED') {
+      throw new Error('Execution blocked: Session is suspended.');
+    }
+    sessionManager.setState('EXECUTING', { planSummary: plan.summary });
   }
-  return results;
+
+  const results = [];
+  try {
+    for (const action of plan.actions) {
+      const actionResults = await executeAction(action, context);
+      results.push(...(Array.isArray(actionResults) ? actionResults : [actionResults]));
+    }
+    if (sessionManager) {
+      sessionManager.setState('COMPLETED', { resultsCount: results.length });
+    }
+    return results;
+  } catch (error) {
+    if (sessionManager) {
+      if (sessionManager.getState() !== 'EMERGENCY_STOP' && sessionManager.getState() !== 'TERMINATED') {
+        sessionManager.setState('FAILED', { error: error.message });
+      }
+    }
+    throw error;
+  }
 }
 
 module.exports = { executePlan };

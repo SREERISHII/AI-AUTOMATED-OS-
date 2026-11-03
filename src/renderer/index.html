@@ -18,11 +18,139 @@
           </div>
         </div>
         <div class="header-actions">
+          <span id="sessionStatusPill" class="session-pill pill-idle" title="Session Activity Manager Status">IDLE</span>
+          <button id="toggleSecurityPanelBtn" class="btn btn-small btn-security" title="Open Security Activity Manager">
+            🛡️ Security Activity Manager
+            <span id="alertCountBadge" class="alert-badge hidden">0</span>
+          </button>
           <button id="newChatBtn" class="btn btn-small btn-outline" title="Start a fresh conversation">
             ➕ New Conversation
           </button>
         </div>
       </header>
+
+      <!-- Security Activity Manager Drawer / Panel -->
+      <aside id="securityPanel" class="security-panel hidden">
+        <div class="sec-panel-header">
+          <div class="sec-title-wrap">
+            <span class="sec-icon">🛡️</span>
+            <div>
+              <h3>Session Activity Manager</h3>
+              <p id="panelSessionId" class="panel-session-text">Session: initializing...</p>
+            </div>
+          </div>
+          <div class="sec-header-right">
+            <span id="panelStateBadge" class="session-pill pill-idle">IDLE</span>
+            <button id="closeSecurityPanelBtn" class="btn-icon-close" title="Close security panel">✕</button>
+          </div>
+        </div>
+
+        <!-- Security Navigation Tabs -->
+        <nav class="sec-tabs">
+          <button class="sec-tab active" data-tab="tab-overview">Overview</button>
+          <button class="sec-tab" data-tab="tab-alerts">Alerts & Blocks <span id="tabAlertCountBadge" class="pill-count">0</span></button>
+          <button class="sec-tab" data-tab="tab-activity">Activity Feed</button>
+          <button class="sec-tab" data-tab="tab-config">Security Config</button>
+        </nav>
+
+        <!-- Tab 1: Overview & Controls -->
+        <div id="tab-overview" class="sec-tab-pane active">
+          <div class="sec-summary-grid">
+            <div class="metric-card">
+              <span class="metric-label">Policy Model</span>
+              <span class="metric-val text-green">Default-Deny Active</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">Authority</span>
+              <span class="metric-val text-blue">User Approval Gate</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">Active Tasks</span>
+              <span id="metricActiveTasks" class="metric-val">0</span>
+            </div>
+            <div class="metric-card">
+              <span class="metric-label">Security Violations</span>
+              <span id="metricAlertCount" class="metric-val text-red">0</span>
+            </div>
+          </div>
+
+          <div class="sec-control-section">
+            <h4>Session Protection Controls</h4>
+            <div class="sec-btn-row">
+              <button id="btnSuspendSession" class="btn btn-small btn-outline btn-amber">⏸️ Suspend Session</button>
+              <button id="btnResumeSession" class="btn btn-small btn-outline btn-green hidden">▶️ Resume Session</button>
+              <button id="btnTerminateSession" class="btn btn-small btn-outline btn-red">🛑 Terminate Session</button>
+              <button id="btnResetSession" class="btn btn-small btn-outline">🔄 Reset Session</button>
+              <button id="btnExportReport" class="btn btn-small btn-primary">📋 Export Safe Audit Report</button>
+            </div>
+          </div>
+
+          <div class="sec-status-detail">
+            <h4>Active Guardrails</h4>
+            <ul class="guardrail-list">
+              <li>✅ AI model untrusted — cannot self-approve any action</li>
+              <li>✅ Path traversal (..) and system path access strictly blocked</li>
+              <li>✅ Child processes and network sockets monitored & cancelable</li>
+              <li>✅ Automatic emergency shutdown on unauthorized action attempt</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Tab 2: Security Alerts & Blocked Actions -->
+        <div id="tab-alerts" class="sec-tab-pane">
+          <div class="sec-pane-desc">
+            <span>Critical alerts and blocked attempts recorded by backend policy enforcement.</span>
+          </div>
+          <div id="alertsContainer" class="alerts-container">
+            <div class="sec-empty-state">No security boundary violations detected. System is secure.</div>
+          </div>
+        </div>
+
+        <!-- Tab 3: Activity Feed -->
+        <div id="tab-activity" class="sec-tab-pane">
+          <div class="sec-pane-desc">
+            <span>Chronological audit trail of all AI tool requests, path verifications, and approvals.</span>
+          </div>
+          <div id="activityFeedContainer" class="activity-feed">
+            <div class="sec-empty-state">No activities recorded in current session.</div>
+          </div>
+        </div>
+
+        <!-- Tab 4: Security Configuration -->
+        <div id="tab-config" class="sec-tab-pane">
+          <div class="config-group">
+            <h4>Network & Sharing Boundary</h4>
+            <label class="toggle-control">
+              <input type="checkbox" id="chkNetworkAccess" checked />
+              <span class="toggle-slider"></span>
+              <span class="toggle-label">Enable External Network Access (SMTP / Authorized Hosts)</span>
+            </label>
+            <label class="toggle-control">
+              <input type="checkbox" id="chkFileSharing" />
+              <span class="toggle-slider"></span>
+              <span class="toggle-label">Enable External File Sharing Features (Default: Disabled)</span>
+            </label>
+          </div>
+
+          <div class="config-group">
+            <h4>Permitted Directory Allowlist</h4>
+            <div id="allowedFoldersList" class="tag-list"></div>
+            <div class="add-row">
+              <input type="text" id="newFolderInput" placeholder="Add relative or absolute folder..." class="config-input" />
+              <button id="btnAddFolder" class="btn btn-small btn-outline">Add Folder</button>
+            </div>
+          </div>
+
+          <div class="config-group">
+            <h4>Permitted Network Domains</h4>
+            <div id="allowedDomainsList" class="tag-list"></div>
+            <div class="add-row">
+              <input type="text" id="newDomainInput" placeholder="e.g. smtp.gmail.com" class="config-input" />
+              <button id="btnAddDomain" class="btn btn-small btn-outline">Add Domain</button>
+            </div>
+          </div>
+        </div>
+      </aside>
 
       <!-- Scrollable Chat History -->
       <main id="chatContainer" class="chat-container">
@@ -66,6 +194,53 @@
           <span class="shortcut-badge">Alt + Space to toggle</span>
         </div>
       </footer>
+    </div>
+
+    <!-- Critical Emergency Security Modal -->
+    <div id="emergencyModal" class="emergency-modal-backdrop hidden">
+      <div class="emergency-modal-card">
+        <div class="emergency-header">
+          <span class="emergency-icon">🚨</span>
+          <div>
+            <h2>CRITICAL SECURITY VIOLATION DETECTED</h2>
+            <p>Automatic Session Activity Manager has intervened</p>
+          </div>
+        </div>
+        <div class="emergency-body">
+          <div id="emergencyAlertBox" class="emergency-alert-message">
+            The AI model attempted a restricted action without approved permission.
+          </div>
+          <table class="emergency-details-table">
+            <tr>
+              <td><strong>Audit Event ID:</strong></td>
+              <td id="emEventId">N/A</td>
+            </tr>
+            <tr>
+              <td><strong>Violating Action:</strong></td>
+              <td id="emAction">N/A</td>
+            </tr>
+            <tr>
+              <td><strong>Tool / Process:</strong></td>
+              <td id="emTool">N/A</td>
+            </tr>
+            <tr>
+              <td><strong>Target Location / Domain:</strong></td>
+              <td id="emTarget">N/A</td>
+            </tr>
+            <tr>
+              <td><strong>Security Reason:</strong></td>
+              <td id="emReason">N/A</td>
+            </tr>
+            <tr>
+              <td><strong>Application Status:</strong></td>
+              <td class="text-red"><strong>EMERGENCY_STOP • TERMINATING APPLICATION</strong></td>
+            </tr>
+          </table>
+          <p class="emergency-closing-note">
+            The application is closing automatically to protect your files and system. No unapproved data was transmitted.
+          </p>
+        </div>
+      </div>
     </div>
 
     <script src="renderer.js"></script>

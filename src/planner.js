@@ -255,7 +255,7 @@ function buildUnsupportedReply() {
 // ---------------------------------------------------------------------------
 //  LLM-Enhanced Conversation Reply (with history context)
 // ---------------------------------------------------------------------------
-async function buildConversationReply(request, intent) {
+async function buildConversationReply(request, intent, sessionManager = null) {
   const conversationPrompt = `You are a friendly, concise desktop assistant called "Private OS Agent". You help with file operations inside the user's Documents folder and email drafting/sending.
 
 RULES:
@@ -272,19 +272,35 @@ RULES:
 
 Return ONLY valid JSON: {"reply":"string"}`;
 
+  let abortController = null;
+  if (sessionManager) {
+    if (sessionManager.sessionClosed || sessionManager.getState() === 'TERMINATED' || sessionManager.getState() === 'EMERGENCY_STOP') {
+      return "Session is closed or terminated.";
+    }
+    abortController = sessionManager.createAbortController();
+  }
+
   try {
     const messages = [{ role: 'system', content: conversationPrompt }];
     const recent = getRecentHistory(4);
     for (const turn of recent) {
       messages.push({ role: turn.role, content: turn.content });
     }
-    messages.push({ role: 'user', content: String(request || '').trim() });
+    const cleanUserPrompt = sessionManager
+      ? sessionManager.sanitizeModelPrompt(request, { purpose: 'conversation_reply' }).sanitizedPrompt
+      : String(request || '').trim();
+    messages.push({ role: 'user', content: cleanUserPrompt });
 
-    const response = await fetch(OLLAMA_URL, {
+    const signals = [AbortSignal.timeout(2000)];
+    if (abortController) signals.push(abortController.signal);
+    const fetchOptions = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, stream: false, format: 'json', options: { temperature: 0.7 }, messages })
-    });
+      body: JSON.stringify({ model, stream: false, format: 'json', options: { temperature: 0.7 }, messages }),
+      signal: AbortSignal.any(signals)
+    };
+
+    const response = await fetch(OLLAMA_URL, fetchOptions);
     if (!response.ok) throw new Error(`Ollama returned ${response.status}`);
     const data = await response.json();
     const result = cleanJson(data.message?.content || '');
@@ -301,6 +317,10 @@ Return ONLY valid JSON: {"reply":"string"}`;
       case INTENTS.CAPABILITIES: return capabilitySummary;
       case INTENTS.UNSUPPORTED: return buildUnsupportedReply();
       default: return "I'm here to help with your Documents files and email tasks. What would you like to do?";
+    }
+  } finally {
+    if (sessionManager && abortController) {
+      sessionManager.releaseAbortController(abortController);
     }
   }
 }
@@ -476,9 +496,48 @@ function extractStartsWith(request) {
   return match ? match[1] : null;
 }
 
+function extractExplicitPath(text) {
+  if (!text || typeof text !== 'string') return null;
+  const clean = text.trim();
+
+  // 1. Quoted path first (e.g. "D:\IPHONE 16\CLG" or 'D:/...')
+  const quoted = /["']([a-zA-Z]:[\\/][^"']+|[\\/][^"']+|\\\\[^"']+)["']/.exec(clean);
+  if (quoted) return quoted[1].trim();
+
+  // 2. Windows drive path: e.g. D:\IPHONE 16\CLG open rhis or open D:\IPHONE 16\CLG
+  const winMatch = /\b([a-zA-Z]:[\\/][^\n\r,;*?<>|]+)/i.exec(clean);
+  if (winMatch) {
+    let p = winMatch[1].trim();
+    p = p.replace(/\s+(?:open|show|list|display|view|explore|delete|remove|create|move|rename|this|rhis|thsi|tihs|it|please|file|folder|directory)\b.*$/i, '').trim();
+    return p;
+  }
+
+  // 3. UNC network share: e.g. \\server\share
+  const uncMatch = /(^|\s)(\\\\[a-zA-Z0-9_.-]+\\[^\n\r,;*?<>|]+)/.exec(clean);
+  if (uncMatch) {
+    let p = uncMatch[2].trim();
+    p = p.replace(/\s+(?:open|show|list|display|view|explore|delete|remove|create|move|rename|this|rhis|thsi|tihs|it|please|file|folder|directory)\b.*$/i, '').trim();
+    return p;
+  }
+
+  // 4. Unix root absolute path: e.g. /etc/passwd or /Users/...
+  const rootMatch = /(^|\s)([\\/][a-zA-Z0-9_.-]+[\\/][^\n\r,;*?<>|]+)/.exec(clean);
+  if (rootMatch) {
+    let p = rootMatch[2].trim();
+    p = p.replace(/\s+(?:open|show|list|display|view|explore|delete|remove|create|move|rename|this|rhis|thsi|tihs|it|please|file|folder|directory)\b.*$/i, '').trim();
+    return p;
+  }
+
+  return null;
+}
+
 function extractTargetFolder(text) {
   if (!text || typeof text !== 'string') return null;
   const clean = text.trim();
+
+  // Explicit path (Windows drive, UNC, or absolute)
+  const explicit = extractExplicitPath(clean);
+  if (explicit) return explicit;
 
   // Explicit documents root
   if (/^(?:open|show|list|display|view|explore)\s+(?:the\s+)?(?:my\s+)?documents?(?:\s+folder|\s+directory)?$/i.test(clean)) {
@@ -489,21 +548,21 @@ function extractTargetFolder(text) {
   const mIn = /(?:inside|in|within|of|from)\s+(?:the\s+)?(?:folder\s+|directory\s+)?["']?([a-zA-Z0-9_ -]+?)["']?(?:\s+(?:folder|directory|alone|only|named|called|name\s+as|name)|\s*$|[.?!])/i.exec(clean);
   if (mIn) {
     const folder = mIn[1].trim();
-    if (!/^(documents?|my documents?|all|this|here|it|me|them|us)$/i.test(folder)) return folder;
+    if (!/^(documents?|my documents?|all|this|rhis|thsi|tihs|here|it|me|them|us)$/i.test(folder)) return folder;
   }
 
   // "folder/directory named/called/name [name]" (e.g. "show folder name 00AA", "open folder 0 IT")
   const mFolderNamed = /(?:folder|directory)\s+(?:named\s+|called\s+|name\s+as\s+|name\s+)?["']?([a-zA-Z0-9_ -]+?)["']?(?:\s+(?:folder|directory)|\s*$|[.?!])/i.exec(clean);
   if (mFolderNamed) {
     const f = mFolderNamed[1].trim();
-    if (!/^(documents?|my documents?|all|this|here|it|the|name|folder|directory|alone|only)$/i.test(f)) return f;
+    if (!/^(documents?|my documents?|all|this|rhis|thsi|tihs|here|it|the|name|folder|directory|alone|only)$/i.test(f)) return f;
   }
 
   // Direct: "show/list/open [name]"
   const mDirect = /(?:show|list|display|view|explore|open)\s+(?:the\s+)?(?:contents?\s+of\s+)?(?:folder\s+|directory\s+)?["']?([a-zA-Z0-9_ -]+?)["']?(?:\s+(?:folder|directory)|\s*$|[.?!])/i.exec(clean);
   if (mDirect) {
     const f = mDirect[1].trim();
-    if (!/^(documents?|my documents?|all|this|here|it|the|files?|folders?|items?|everything|alone|only)$/i.test(f)) return f;
+    if (!/^(documents?|my documents?|all|this|rhis|thsi|tihs|here|it|the|files?|folders?|items?|everything|alone|only)$/i.test(f)) return f;
   }
 
   return null;
@@ -562,6 +621,10 @@ function extractRenameParameters(text) {
 function normalizeDocumentsPath(value) {
   if (value === null || value === undefined) return '.';
   let str = String(value).trim();
+  // Preserve explicit absolute Windows or Unix/UNC paths so security verification can inspect and block them!
+  if (/^[a-zA-Z]:[\\/]/.test(str) || path.isAbsolute(str) || /^\\\\[^\\]/.test(str)) {
+    return str;
+  }
   str = str.replace(/^[.\\/]+/, '');
   str = str.replace(/^documents[\\/]+/i, '');
   if (!str || str === '.' || /^documents$/i.test(str)) return '.';
@@ -684,7 +747,7 @@ function normalizePlanPaths(plan, request = '') {
       }
 
       let rawPath = action.path;
-      if (action.type === 'list_directory' && inferredFolder) {
+      if ((action.type === 'list_directory' || action.type === 'open') && inferredFolder) {
         rawPath = inferredFolder;
       } else if (['create_folder', 'create_file', 'delete'].includes(action.type)) {
         const itemName = inferredItemName || path.basename(action.path || '');
@@ -812,7 +875,8 @@ function fallbackPlan(request) {
     if (/^\s*open\s+(?:the\s+)?(?:my\s+)?documents?\s*$/i.test(text)) {
       return { summary: 'Open Documents', actions: [{ type: 'open', path: '.' }] };
     }
-    const openTarget = targetFolder || item || extractNewItemName(text);
+    const explicitPath = extractExplicitPath(text);
+    const openTarget = explicitPath || targetFolder || item || extractNewItemName(text);
     if (openTarget) {
       return { summary: `Open "${openTarget}"`, actions: [{ type: 'open', path: openTarget }] };
     }
@@ -921,9 +985,29 @@ function isFollowUp(text) {
 // ---------------------------------------------------------------------------
 //  buildPlan — Main Entry Point
 // ---------------------------------------------------------------------------
-async function buildPlan(request, documentsRoot) {
+async function buildPlan(request, documentsRoot, sessionManager = null) {
   const text = String(request || '').trim();
   if (!text) return { summary: 'No request supplied', actions: [], planner: 'none' };
+
+  if (sessionManager) {
+    if (sessionManager.getState() === 'SUSPENDED') {
+      return {
+        summary: 'Session Suspended',
+        reply: 'The session is currently suspended. Please open the Security Activity Manager panel (click 🛡️ in top-right) and click "▶️ Resume Session" to continue.',
+        actions: [],
+        planner: 'session-manager:suspended'
+      };
+    }
+    if (sessionManager.sessionClosed || sessionManager.getState() === 'TERMINATED' || sessionManager.getState() === 'EMERGENCY_STOP') {
+      return {
+        summary: 'Session Terminated',
+        reply: 'The session has been terminated by the security manager. Please click "Reset Session" or "➕ New Conversation" to start a fresh secure session.',
+        actions: [],
+        planner: 'session-manager:terminated'
+      };
+    }
+    sessionManager.setState('ANALYZING', { request: text });
+  }
 
   // Strip leading negation like "no list documents" -> "list documents"
   const noPrefixMatch = /^(?:no|nah|nope|wait|stop)[,\s]+(.+)$/i.exec(text);
@@ -945,10 +1029,19 @@ async function buildPlan(request, documentsRoot) {
     } else if (intent === INTENTS.CAPABILITIES) {
       reply = capabilitySummary;
     } else {
-      reply = await buildConversationReply(cleanText, intent);
+      reply = await buildConversationReply(cleanText, intent, sessionManager);
     }
     pushHistory('user', text);
     pushHistory('assistant', reply);
+    if (sessionManager) {
+      sessionManager.setState('IDLE', { conversation: true });
+      sessionManager.recordActivity({
+        userMessage: text,
+        modelResponse: reply,
+        currentStatus: 'IDLE',
+        actionReason: 'Conversational response generated'
+      });
+    }
     return { summary: 'Conversation', reply, actions: [], planner: intent === INTENTS.CAPABILITIES ? 'deterministic:capabilities' : `conversation:${intent}` };
   }
 
@@ -962,13 +1055,26 @@ async function buildPlan(request, documentsRoot) {
     pushHistory('user', text);
     const reply = 'Understood. I cancelled that action. What would you like to do instead?';
     pushHistory('assistant', reply);
+    if (sessionManager) {
+      sessionManager.setState('IDLE', { cancelled: true });
+    }
     return { summary: 'Cancelled', reply, actions: [], intent: INTENTS.CANCELLATION, planner: 'deterministic:cancellation' };
   }
 
   // --- Task History ---
   if (intent === INTENTS.TASK_HISTORY || isTaskHistoryRequest(cleanText)) {
     pushHistory('user', text);
-    return { summary: 'Recent task history', actions: [{ type: 'show_task_history' }], planner: 'deterministic:task_history' };
+    const plan = { summary: 'Recent task history', actions: [{ type: 'show_task_history' }], planner: 'deterministic:task_history' };
+    if (sessionManager) {
+      sessionManager.setState('ACTION_PROPOSED', { actionsCount: 1 });
+      sessionManager.recordActivity({
+        userMessage: text,
+        requestedAction: plan.actions[0],
+        toolName: 'show_task_history',
+        currentStatus: 'ACTION_PROPOSED'
+      });
+    }
+    return plan;
   }
 
   // --- File List (Deterministic, instantaneous, 100% reliable, zero hallucination) ---
@@ -978,6 +1084,18 @@ async function buildPlan(request, documentsRoot) {
     const corrected = await correctAttachmentTypos(fallback, documentsRoot);
     pushHistory('user', text);
     conversationContext.lastPlan = corrected;
+    if (sessionManager) {
+      sessionManager.setState('ACTION_PROPOSED', { actionsCount: corrected.actions.length });
+      for (const act of corrected.actions) {
+        sessionManager.recordActivity({
+          userMessage: text,
+          requestedAction: act,
+          toolName: act.type,
+          sourcePath: act.path || null,
+          currentStatus: 'ACTION_PROPOSED'
+        });
+      }
+    }
     return { ...corrected, planner: 'deterministic:file_list' };
   }
 
@@ -986,6 +1104,18 @@ async function buildPlan(request, documentsRoot) {
     const fallback = fallbackPlan(cleanText);
     pushHistory('user', text);
     conversationContext.lastPlan = fallback;
+    if (sessionManager) {
+      sessionManager.setState('ACTION_PROPOSED', { actionsCount: fallback.actions.length });
+      for (const act of fallback.actions) {
+        sessionManager.recordActivity({
+          userMessage: text,
+          requestedAction: act,
+          toolName: act.type,
+          sourcePath: act.path || null,
+          currentStatus: 'ACTION_PROPOSED'
+        });
+      }
+    }
     return { ...fallback, planner: 'deterministic:file_open' };
   }
 
@@ -1000,6 +1130,12 @@ async function buildPlan(request, documentsRoot) {
         planner: 'deterministic:file_organize'
       };
       conversationContext.lastPlan = plan;
+      if (sessionManager) {
+        sessionManager.setState('ACTION_PROPOSED', { actionsCount: 1 });
+        const approval = sessionManager.createApprovalRequest(plan.actions[0]);
+        plan.approvalId = approval.approvalId;
+        plan.requiresApproval = true;
+      }
       return plan;
     }
     const renameParams = extractRenameParameters(cleanText);
@@ -1011,6 +1147,12 @@ async function buildPlan(request, documentsRoot) {
         planner: 'deterministic:file_organize'
       };
       conversationContext.lastPlan = plan;
+      if (sessionManager) {
+        sessionManager.setState('ACTION_PROPOSED', { actionsCount: 1 });
+        const approval = sessionManager.createApprovalRequest(plan.actions[0]);
+        plan.approvalId = approval.approvalId;
+        plan.requiresApproval = true;
+      }
       return plan;
     }
   }
@@ -1025,6 +1167,9 @@ async function buildPlan(request, documentsRoot) {
         const reply = `Based on the previous listing, this looks like it: ${match}`;
         pushHistory('user', text);
         pushHistory('assistant', reply);
+        if (sessionManager) {
+          sessionManager.setState('IDLE', { followUp: true });
+        }
         return { summary: 'Follow-up answer', reply, actions: [], planner: 'deterministic:follow_up' };
       }
     }
@@ -1033,29 +1178,57 @@ async function buildPlan(request, documentsRoot) {
   // --- Task execution: use Ollama with selective history & anti-hallucination validation ---
   let lastError;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
+    let abortController = null;
     try {
+      if (sessionManager) {
+        abortController = sessionManager.createAbortController();
+      }
       const messages = [{ role: 'system', content: systemPrompt }];
-      // ONLY pass conversation history if the request is an actual follow-up
       if (isFollowUp(cleanText)) {
         const recent = getRecentHistory(4);
         for (const turn of recent) {
           messages.push({ role: turn.role, content: turn.content });
         }
       }
-      messages.push({ role: 'user', content: cleanText });
+      const sanitizedUserText = sessionManager
+        ? sessionManager.sanitizeModelPrompt(cleanText, { purpose: 'task_execution' }).sanitizedPrompt
+        : cleanText;
+      messages.push({ role: 'user', content: sanitizedUserText });
 
-      const response = await fetch(OLLAMA_URL, {
+      const signals = [AbortSignal.timeout(2500)];
+      if (abortController) signals.push(abortController.signal);
+      const fetchOptions = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, stream: false, format: 'json', messages })
-      });
+        body: JSON.stringify({ model, stream: false, format: 'json', messages }),
+        signal: AbortSignal.any(signals)
+      };
+
+      const response = await fetch(OLLAMA_URL, fetchOptions);
       if (!response.ok) throw new Error(`Ollama returned ${response.status}`);
       const data = await response.json();
       const plan = cleanJson(data.message?.content || '');
+
+      // Session Activity Manager Security Output Validation
+      if (sessionManager) {
+        const validation = sessionManager.validateModelOutput(plan);
+        if (!validation.valid) {
+          if (validation.securityViolation) {
+            await sessionManager.triggerEmergencyStop({
+              action: validation.action?.type || 'unauthorized_model_action',
+              tool: validation.action?.type || 'Ollama',
+              target: validation.action?.path || validation.action?.destination || 'N/A',
+              reason: validation.reason
+            });
+            throw new Error(`Security boundary violation in AI output: ${validation.reason}`);
+          }
+          throw new Error(`Model validation failed: ${validation.reason}`);
+        }
+      }
+
       validatePlanActions(plan.actions);
 
       // ANTI-HALLUCINATION GUARD:
-      // If the generated actions contradict the classified intent, reject!
       if (!isPlanConsistentWithIntent(plan, intent)) {
         throw new Error(`Planner proposed actions inconsistent with ${intent} (got ${plan.actions.map(a => a.type).join(', ')})`);
       }
@@ -1069,9 +1242,37 @@ async function buildPlan(request, documentsRoot) {
       pushHistory('user', text);
       if (correctedPlan.reply) pushHistory('assistant', correctedPlan.reply);
       conversationContext.lastPlan = correctedPlan;
+
+      if (sessionManager) {
+        sessionManager.setState('ACTION_PROPOSED', { actionsCount: correctedPlan.actions.length });
+        for (const act of correctedPlan.actions) {
+          sessionManager.recordActivity({
+            userMessage: text,
+            requestedAction: act,
+            toolName: act.type,
+            sourcePath: act.path || null,
+            destinationPath: act.destination || null,
+            currentStatus: 'ACTION_PROPOSED'
+          });
+        }
+        const requiresAppr = correctedPlan.actions.some(a => ['create_file', 'create_folder', 'rename', 'move', 'delete', 'send_email', 'copy', 'upload', 'share'].includes(a.type));
+        if (requiresAppr && correctedPlan.actions.length > 0) {
+          const approval = sessionManager.createApprovalRequest(correctedPlan.actions[0]);
+          correctedPlan.approvalId = approval.approvalId;
+          correctedPlan.requiresApproval = true;
+        }
+      }
+
       return { ...correctedPlan, planner: `ollama:${model}` };
     } catch (error) {
       lastError = error;
+      if (sessionManager && (sessionManager.getState() === 'EMERGENCY_STOP' || sessionManager.getState() === 'TERMINATED')) {
+        throw error;
+      }
+    } finally {
+      if (sessionManager && abortController) {
+        sessionManager.releaseAbortController(abortController);
+      }
     }
   }
 
@@ -1082,13 +1283,44 @@ async function buildPlan(request, documentsRoot) {
   pushHistory('user', text);
   if (correctedFallback.reply) pushHistory('assistant', correctedFallback.reply);
   conversationContext.lastPlan = correctedFallback;
+
+  if (sessionManager) {
+    sessionManager.setState('ACTION_PROPOSED', { actionsCount: correctedFallback.actions.length });
+    for (const act of correctedFallback.actions) {
+      sessionManager.recordActivity({
+        userMessage: text,
+        requestedAction: act,
+        toolName: act.type,
+        sourcePath: act.path || null,
+        destinationPath: act.destination || null,
+        currentStatus: 'ACTION_PROPOSED'
+      });
+    }
+    const requiresAppr = correctedFallback.actions.some(a => ['create_file', 'create_folder', 'rename', 'move', 'delete', 'send_email', 'copy', 'upload', 'share'].includes(a.type));
+    if (requiresAppr && correctedFallback.actions.length > 0) {
+      const approval = sessionManager.createApprovalRequest(correctedFallback.actions[0]);
+      correctedFallback.approvalId = approval.approvalId;
+      correctedFallback.requiresApproval = true;
+    }
+  }
+
   return { ...correctedFallback, planner: `fallback (${lastError?.message || 'planner failed'})` };
 }
 
 // ---------------------------------------------------------------------------
 //  buildEmailRevision (unchanged logic, uses conversation history for context)
 // ---------------------------------------------------------------------------
-async function buildEmailRevision(currentDraft, revisionInstruction) {
+async function buildEmailRevision(currentDraft, revisionInstruction, sessionManager = null) {
+  if (sessionManager) {
+    if (sessionManager.sessionClosed || sessionManager.getState() === 'TERMINATED' || sessionManager.getState() === 'EMERGENCY_STOP') {
+      throw new Error('Session is closed or terminated. Cannot revise email.');
+    }
+    if (sessionManager.getState() === 'SUSPENDED') {
+      throw new Error('Session is suspended. Cannot revise email.');
+    }
+    sessionManager.setState('ANALYZING', { revisionInstruction });
+  }
+
   const cleanBody = normalizeEmailText(currentDraft.body || '');
   const revisionPrompt = `You are editing an existing email draft. The user wants a SMALL CHANGE. You MUST keep the original meaning, topic, and intent of the email intact.
 
@@ -1122,43 +1354,89 @@ Return ONLY valid JSON:
 
   let lastError;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
+    let abortController = null;
     try {
-    const strongerInstruction = attempt === 1
-      ? revisionPrompt
-      : `${revisionPrompt}\n\nThis is a retry. The previous answer did not apply the requested change. Rewrite the complete subject and body now. The requested change MUST be visible in the output, while preserving all other details.`;
-    const response = await fetch(OLLAMA_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model,
-        stream: false,
-        format: 'json',
-        messages: [
-          { role: 'system', content: 'You are an email editor. You make precise, targeted edits to email drafts while preserving the original topic and meaning. Never change what the email is about.' },
-          { role: 'user', content: strongerInstruction }
-        ]
-      })
-    });
-    if (!response.ok) throw new Error(`Ollama returned status ${response.status}`);
-    const data = await response.json();
-    const revised = normalizeEmailAction(cleanJson(data.message?.content || ''));
-    if (!Array.isArray(revised.to) || !revised.to.length || !String(revised.subject || '').trim() || !String(revised.body || '').trim()) {
-      throw new Error('Ollama returned an incomplete email draft');
-    }
-    const normalizedCurrent = normalizeEmailAction(currentDraft);
-    const unchanged = revised.subject === normalizedCurrent.subject && revised.body === normalizedCurrent.body;
-    if (unchanged && String(revisionInstruction || '').trim()) {
-      throw new Error('Ollama returned an unchanged email draft');
-    }
-    return {
-      type: 'send_email',
-      to: revised.to,
-      subject: revised.subject,
-      body: revised.body,
-      attachments: filterValidAttachments(revised.attachments || currentDraft.attachments || [])
-    };
+      if (sessionManager) {
+        abortController = sessionManager.createAbortController();
+      }
+      const strongerInstruction = attempt === 1
+        ? revisionPrompt
+        : `${revisionPrompt}\n\nThis is a retry. The previous answer did not apply the requested change. Rewrite the complete subject and body now. The requested change MUST be visible in the output, while preserving all other details.`;
+
+      const fetchOptions = {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          stream: false,
+          format: 'json',
+          messages: [
+            { role: 'system', content: 'You are an email editor. You make precise, targeted edits to email drafts while preserving the original topic and meaning. Never change what the email is about.' },
+            { role: 'user', content: strongerInstruction }
+          ]
+        })
+      };
+      const signals = [AbortSignal.timeout(2500)];
+      if (abortController) signals.push(abortController.signal);
+      fetchOptions.signal = AbortSignal.any(signals);
+
+      const response = await fetch(OLLAMA_URL, fetchOptions);
+      if (!response.ok) throw new Error(`Ollama returned status ${response.status}`);
+      const data = await response.json();
+      const revised = normalizeEmailAction(cleanJson(data.message?.content || ''));
+
+      if (sessionManager) {
+        const validation = sessionManager.validateModelOutput({ actions: [revised] });
+        if (!validation.valid) {
+          if (validation.securityViolation) {
+            await sessionManager.triggerEmergencyStop({
+              action: 'send_email',
+              tool: 'Ollama:email-revision',
+              target: revised.to?.join(', ') || 'N/A',
+              reason: validation.reason
+            });
+            throw new Error(`Security boundary violation in revised email: ${validation.reason}`);
+          }
+        }
+      }
+
+      if (!Array.isArray(revised.to) || !revised.to.length || !String(revised.subject || '').trim() || !String(revised.body || '').trim()) {
+        throw new Error('Ollama returned an incomplete email draft');
+      }
+      const normalizedCurrent = normalizeEmailAction(currentDraft);
+      const unchanged = revised.subject === normalizedCurrent.subject && revised.body === normalizedCurrent.body;
+      if (unchanged && String(revisionInstruction || '').trim()) {
+        throw new Error('Ollama returned an unchanged email draft');
+      }
+      const finalAction = {
+        type: 'send_email',
+        to: revised.to,
+        subject: revised.subject,
+        body: revised.body,
+        attachments: filterValidAttachments(revised.attachments || currentDraft.attachments || [])
+      };
+
+      if (sessionManager) {
+        sessionManager.setState('ACTION_PROPOSED', { emailRevised: true });
+        sessionManager.recordActivity({
+          userMessage: revisionInstruction,
+          requestedAction: finalAction,
+          toolName: 'send_email',
+          emailRecipient: finalAction.to.join(', '),
+          currentStatus: 'ACTION_PROPOSED'
+        });
+      }
+
+      return finalAction;
     } catch (error) {
       lastError = error;
+      if (sessionManager && (sessionManager.getState() === 'EMERGENCY_STOP' || sessionManager.getState() === 'TERMINATED')) {
+        throw error;
+      }
+    } finally {
+      if (sessionManager && abortController) {
+        sessionManager.releaseAbortController(abortController);
+      }
     }
   }
   if (lastError) return applyLocalRevisionFallback(currentDraft, revisionInstruction);

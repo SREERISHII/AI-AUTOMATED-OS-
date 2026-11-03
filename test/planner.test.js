@@ -46,5 +46,34 @@ console.log('Planner capability query tests passed.');
   assert(capPlan.reply.includes('File Operations'));
   assert.equal(capPlan.planner, 'deterministic:capabilities');
   console.log('Planner capability plan tests passed.');
+
+  // Test external drive path extraction & restriction
+  const { checkPlan } = require('../src/permission-manager');
+  const extPlan1 = await buildPlan('D:\\IPHONE 16\\CLG open rhis', 'C:\\dummy');
+  assert.equal(extPlan1.actions.length, 1);
+  assert.equal(extPlan1.actions[0].type, 'open');
+  assert.equal(extPlan1.actions[0].path, 'D:\\IPHONE 16\\CLG');
+  const perm1 = checkPlan(extPlan1, 'C:\\dummy');
+  assert.strictEqual(perm1.allowed, false, 'External path must be disallowed');
+  assert.ok(perm1.reasons.some(r => r.includes('outside the Documents safe area')));
+  console.log('External path D:\\IPHONE 16\\CLG open rhis blocked as restricted access test passed.');
+
+  const extPlan2 = await buildPlan('open D:\\IPHONE 16\\CLG', 'C:\\dummy');
+  assert.equal(extPlan2.actions.length, 1);
+  assert.equal(extPlan2.actions[0].type, 'open');
+  assert.equal(extPlan2.actions[0].path, 'D:\\IPHONE 16\\CLG');
+  const perm2 = checkPlan(extPlan2, 'C:\\dummy');
+  assert.strictEqual(perm2.allowed, false);
+  console.log('External path open D:\\IPHONE 16\\CLG blocked as restricted access test passed.');
+
+  // Test suspended session graceful handling
+  const fakeSuspendedMgr = {
+    getState: () => 'SUSPENDED',
+    sessionClosed: false
+  };
+  const suspendedPlan = await buildPlan('list files', 'C:\\dummy', fakeSuspendedMgr);
+  assert.equal(suspendedPlan.summary, 'Session Suspended');
+  assert.ok(suspendedPlan.reply.includes('currently suspended'));
+  console.log('Suspended session graceful reply test passed.');
 })();
 
